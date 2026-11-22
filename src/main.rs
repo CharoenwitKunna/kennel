@@ -443,6 +443,8 @@ impl App {
                 // Options are "No, exit" (default) then "Yes, I trust this folder".
                 l.sess.write(b"\x1b[B".to_vec());
                 l.sess.write_after(b"\r", Duration::from_millis(300));
+                // The prompt stays on screen a moment longer; don't call it a question.
+                l.last_scan = Instant::now() + Duration::from_secs(2);
             }
             l.pending_trust = None;
         }

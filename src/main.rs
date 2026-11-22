@@ -711,13 +711,7 @@ impl App {
                         }
                     });
                 });
-                ui.add_space(2.0);
-                let model = if a.provider == Provider::OpenCode { "model from /models" } else if a.model.trim().is_empty() { "default model" } else { a.model.trim() };
-                let folder = if a.cwd.trim().is_empty() { "home folder" } else { a.cwd.trim() };
-                ui.label(
-                    RichText::new(format!("{model}  ·  {}  ·  {folder}", a.permission.label())).small().color(MUTED),
-                );
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 let s = a.session_usage;
                 let t = a.total_usage();
                 ui.horizontal_wrapped(|ui| {

@@ -214,3 +214,57 @@ fn live_key_probe() {
     std::thread::sleep(Duration::from_secs(2));
     dump("keys", &sess);
 }
+
+/// Distinct foreground colors currently on screen (to diagnose color output).
+fn color_census(sess: &TermSession) -> Vec<String> {
+    let t = sess.term.lock();
+    let mut seen = std::collections::BTreeSet::new();
+    for c in t.renderable_content().display_iter {
+        if c.c != ' ' {
+            seen.insert(format!("{:?}", c.fg));
+        }
+    }
+    seen.into_iter().collect()
+}
+
+#[test]
+#[ignore]
+fn live_color_probe() {
+    // Reproduce a parent shell with NO_COLOR set; Kennel must still give agents color.
+    std::env::set_var("NO_COLOR", "1");
+    crate::term::scrub_parent_session_env();
+    let agent = {
+        let mut a = Agent::new(9003, "color".into(), Provider::Claude);
+        a.cwd = work_dir().to_string_lossy().into();
+        a.model = "haiku".into();
+        a
+    };
+    for force in [false, true] {
+        let mut launch = runner::launch(&agent, &Settings::default(), &app_exe()).unwrap();
+        if force {
+            launch.spec.env.insert("FORCE_COLOR".into(), "3".into());
+        }
+        let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+        wait_for(&sess, &["\u{276f}"], 20);
+        wait_quiet(&sess, 1000, 10);
+        println!("FORCE_COLOR={force}: {:?}", color_census(&sess));
+        if !force {
+            let t = sess.term.lock();
+            let mut line = -1;
+            let mut cur = String::new();
+            let mut out = String::new();
+            for c in t.renderable_content().display_iter {
+                if c.point.line.0 != line {
+                    line = c.point.line.0;
+                    out.push('\n');
+                    cur.clear();
+                }
+                let tag = match c.fg { alacritty_terminal::vte::ansi::Color::Named(_) => String::new(), other => format!("{other:?}") };
+                if tag != cur && c.c != ' ' { out.push_str(&format!("[{}]", if tag.is_empty() { "fg".into() } else { tag.replace("Spec(Rgb { ", "").replace(" })", "") })); cur = tag; }
+                out.push(c.c);
+            }
+            for l in out.lines().filter(|l| !l.trim().is_empty()).take(14) { println!("|{}", l.trim_end()); }
+        }
+        sess.kill();
+    }
+}

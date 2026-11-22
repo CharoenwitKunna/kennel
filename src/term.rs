@@ -118,6 +118,9 @@ impl TermSession {
         let mut env = spec.env;
         env.insert("TERM".into(), "xterm-256color".into());
         env.insert("COLORTERM".into(), "truecolor".into());
+        // Identify as ourselves, not whatever terminal launched Kennel.
+        env.insert("TERM_PROGRAM".into(), "Kennel".into());
+        env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").into());
         let opts = tty::Options {
             shell: Some(tty::Shell::new(spec.program.to_string_lossy().into_owned(), spec.args)),
             working_directory: spec.cwd,
@@ -281,6 +284,9 @@ pub fn scrub_parent_session_env() {
         "CLAUDE_CODE_EXECPATH",
         "CLAUDE_CODE_MESSAGING_SOCKET",
         "CLAUDE_CODE_MESSAGING_TOKEN",
+        // Kennel draws its own colors; a NO_COLOR meant for the parent shell
+        // would make every agent TUI monochrome.
+        "NO_COLOR",
     ];
     for k in MARKERS {
         std::env::remove_var(k);

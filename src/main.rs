@@ -562,8 +562,8 @@ impl App {
 
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
-            .exact_height(40.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 0)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .exact_height(32.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(6, 0)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     let tip = if self.state.settings.sidebar_hidden { "Show sidebar (Ctrl+Shift+B)" } else { "Hide sidebar (Ctrl+Shift+B)" };
@@ -572,8 +572,8 @@ impl App {
                         self.dirty = true;
                     }
                     logo(ui);
-                    ui.label(RichText::new("Kennel").font(bold(16.0)));
-                    ui.add_space(18.0);
+                    ui.label(RichText::new("Kennel").font(bold(14.0)));
+                    ui.add_space(8.0);
                     segmented(ui, &mut self.view);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let resp = ui.add(primary_button("+  New agent")).on_hover_text("Ctrl+Shift+N");
@@ -623,9 +623,9 @@ impl App {
         }
         egui::SidePanel::left("sidebar")
             .resizable(true)
-            .default_width(210.0)
-            .width_range(170.0..=360.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(8)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .default_width(184.0)
+            .width_range(150.0..=360.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(4)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
                 if self.state.agents.is_empty() {
                     ui.add_space(16.0);
@@ -641,7 +641,7 @@ impl App {
 
                 let agents = self.state.agents.clone();
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.spacing_mut().item_spacing.y = 1.0;
                     let mut rects = Vec::with_capacity(agents.len());
                     for a in &agents {
                         let status = self.status(a.id);
@@ -714,20 +714,20 @@ impl App {
         let inner = egui::Frame::new()
             .fill(if selected { RAISED } else { PANEL })
             .stroke(Stroke::new(1.0_f32, if selected { Color32::from_rgb(0x34, 0x3B, 0x50) } else { Color32::TRANSPARENT }))
-            .corner_radius(6)
-            .inner_margin(Margin::symmetric(7, 4))
+            .corner_radius(5)
+            .inner_margin(Margin::symmetric(6, 2))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.set_height(20.0);
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    app_icon(ui, a.provider, 15.0);
+                    ui.set_height(18.0);
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    app_icon(ui, a.provider, 14.0);
                     if renaming {
-                        self.rename_box(ui, a.id, 13.0, ui.available_width() - 2.0);
+                        self.rename_box(ui, a.id, 12.5, ui.available_width() - 2.0);
                         return;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = 5.0;
                         status_indicator(ui, status, false, age);
                         unread_badge(ui, unread);
                         if attention {
@@ -735,7 +735,7 @@ impl App {
                             ui.painter().circle_filled(r.center(), 3.0, AMBER);
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.add(egui::Label::new(RichText::new(&a.name).font(bold(13.0))).truncate().selectable(false));
+                            ui.add(egui::Label::new(RichText::new(&a.name).font(bold(12.5))).truncate().selectable(false));
                         });
                     });
                 });
@@ -785,7 +785,7 @@ impl App {
 
     fn central(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(6)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(4)))
             .show(ctx, |ui| {
                 let area = ui.max_rect();
                 if self.state.agents.is_empty() {
@@ -805,7 +805,7 @@ impl App {
                 let t = self.view_changed.elapsed().as_secs_f32() / FADE;
                 if t < 1.0 {
                     let veil = (1.0 - t).powi(2);
-                    ui.painter().rect_filled(area.expand(6.0), 0.0, BG.gamma_multiply(veil));
+                    ui.painter().rect_filled(area.expand(4.0), 0.0, BG.gamma_multiply(veil));
                     ui.ctx().request_repaint();
                 }
             });
@@ -813,7 +813,7 @@ impl App {
 
     fn focus_view(&mut self, ui: &mut egui::Ui) {
         self.tab_strip(ui);
-        ui.add_space(4.0);
+        ui.add_space(2.0);
         let Some(id) = self.selected.filter(|id| self.state.agent(*id).is_some()) else {
             ui.centered_and_justified(|ui| ui.label(RichText::new("Select an agent").color(MUTED)));
             return;
@@ -839,14 +839,14 @@ impl App {
                         let inner = egui::Frame::new()
                             .fill(if selected { PANEL } else { Color32::TRANSPARENT })
                             .stroke(Stroke::new(1.0_f32, if selected { BORDER } else { Color32::TRANSPARENT }))
-                            .corner_radius(CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 })
-                            .inner_margin(Margin { left: 9, right: 9, top: 5, bottom: 5 })
+                            .corner_radius(CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 })
+                            .inner_margin(Margin { left: 8, right: 8, top: 3, bottom: 3 })
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    app_icon(ui, a.provider, 13.0);
+                                    ui.spacing_mut().item_spacing.x = 5.0;
+                                    app_icon(ui, a.provider, 12.0);
                                     let color = if selected { TEXT } else { MUTED };
-                                    ui.add(egui::Label::new(RichText::new(&a.name).font(bold(12.5)).color(color)).selectable(false));
+                                    ui.add(egui::Label::new(RichText::new(&a.name).font(bold(12.0)).color(color)).selectable(false));
                                     status_indicator(ui, status, false, age);
                                     unread_badge(ui, unread);
                                     if attention && !selected {
@@ -895,7 +895,7 @@ impl App {
         if self.grid_rows.len() != rows {
             self.grid_rows = vec![1.0 / rows as f32; rows];
         }
-        let gap = 6.0;
+        let gap = 4.0;
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, Sense::hover());
         let avail_w = area.width() - gap * (cols as f32 - 1.0);
@@ -961,12 +961,12 @@ impl App {
         egui::Frame::new()
             .fill(PANEL)
             .stroke(Stroke::new(1.0_f32, border))
-            .corner_radius(8)
-            .inner_margin(Margin::same(3))
+            .corner_radius(6)
+            .inner_margin(Margin::same(2))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 // Empty space in the title row: double-click to maximize / restore.
-                let title_rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 26.0));
+                let title_rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 22.0));
                 let title_bg = ui.interact(title_rect, egui::Id::new(("title", id)), Sense::click());
                 if title_bg.double_clicked() {
                     if in_grid {
@@ -976,17 +976,21 @@ impl App {
                     }
                 }
                 ui.horizontal(|ui| {
-                    ui.set_height(26.0);
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.add_space(4.0);
-                    app_icon(ui, a.provider, 16.0);
-                    self.name_widget(ui, &a, 13.5);
+                    ui.set_height(22.0);
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.add_space(3.0);
+                    app_icon(ui, a.provider, 14.0);
+                    self.name_widget(ui, &a, 12.5);
                     status_indicator(ui, status, true, age);
+                    // Stats grouped in one muted cluster: "12.3k tok · ctx 34%".
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.label(RichText::new("·").small().color(FAINT));
                     let u = a.session_usage;
                     ui.label(
                         RichText::new(format!("{} tok", fmt_tokens(u.total_tokens()))).small().color(FAINT),
                     );
                     if let Some(p) = context {
+                        ui.label(RichText::new("·").small().color(FAINT));
                         ui.label(RichText::new(format!("ctx {p:.0}%")).small().color(context_color(p)))
                             .on_hover_text("How full this conversation's context window is");
                     }
@@ -1049,14 +1053,14 @@ impl App {
                 });
                 if let Some(p) = context {
                     // Thin context gauge under the title.
-                    let (bar, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
+                    let (bar, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 2.0), Sense::hover());
                     let bar = bar.shrink2(Vec2::new(4.0, 0.0));
                     ui.painter().rect_filled(bar, 1.5, BORDER);
                     let fill = egui::Rect::from_min_size(bar.min, Vec2::new(bar.width() * (p / 100.0).clamp(0.0, 1.0), bar.height()));
                     ui.painter().rect_filled(fill, 1.5, context_color(p));
                     resp.on_hover_text(format!("Context {p:.0}% used"));
                 }
-                egui::Frame::new().fill(TERM_BG).corner_radius(6).inner_margin(Margin::same(2)).show(ui, |ui| {
+                egui::Frame::new().fill(TERM_BG).corner_radius(4).inner_margin(Margin::same(1)).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     self.terminal_or_placeholder(ui, id, status, &a);
                 });
@@ -1194,7 +1198,7 @@ impl App {
                     egui::TextEdit::singleline(&mut draft.name)
                         .hint_text("e.g. backend-refactor")
                         .desired_width(f32::INFINITY)
-                        .margin(Margin::symmetric(8, 6)),
+                        .margin(Margin::symmetric(6, 4)),
                 );
                 ui.add_space(8.0);
                 field_label(ui, "Provider");
@@ -1231,7 +1235,7 @@ impl App {
                         egui::TextEdit::singleline(&mut draft.model)
                             .hint_text(hint)
                             .desired_width(ui.available_width() - 40.0)
-                            .margin(Margin::symmetric(8, 6)),
+                            .margin(Margin::symmetric(6, 4)),
                     );
                     ui.menu_button("▾", |ui| {
                         ui.set_min_width(260.0);
@@ -1254,7 +1258,7 @@ impl App {
                     egui::TextEdit::singleline(&mut draft.cwd)
                         .hint_text("C:\\path\\to\\project")
                         .desired_width(f32::INFINITY)
-                        .margin(Margin::symmetric(8, 6)),
+                        .margin(Margin::symmetric(6, 4)),
                 );
                 if !draft.cwd.trim().is_empty() && !std::path::Path::new(draft.cwd.trim()).is_dir() {
                     ui.label(RichText::new("Folder not found").small().color(RED));
@@ -1355,7 +1359,7 @@ impl App {
                         egui::TextEdit::singleline(&mut self.state.settings.claude_path)
                             .hint_text("auto-detect (claude)")
                             .desired_width(f32::INFINITY)
-                            .margin(Margin::symmetric(8, 6)),
+                            .margin(Margin::symmetric(6, 4)),
                     )
                     .changed();
                 found_label(ui, &claude);
@@ -1366,7 +1370,7 @@ impl App {
                         egui::TextEdit::singleline(&mut self.state.settings.opencode_path)
                             .hint_text("auto-detect (opencode)")
                             .desired_width(f32::INFINITY)
-                            .margin(Margin::symmetric(8, 6)),
+                            .margin(Margin::symmetric(6, 4)),
                     )
                     .changed();
                 found_label(ui, &opencode);
@@ -1534,14 +1538,14 @@ impl Drop for App {
 // ---------- small widgets ----------
 
 fn logo(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 6.0, ACCENT);
-    p.rect_filled(rect.shrink(6.0), 2.0, PANEL);
+    p.rect_filled(rect, 5.0, ACCENT);
+    p.rect_filled(rect.shrink(5.0), 2.0, PANEL);
 }
 
 fn segmented(ui: &mut egui::Ui, view: &mut View) {
-    egui::Frame::new().fill(BG).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(8).inner_margin(Margin::same(3)).show(ui, |ui| {
+    egui::Frame::new().fill(BG).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(6).inner_margin(Margin::same(2)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.horizontal(|ui| {
             for (v, label) in [(View::Focus, "▣  Focus"), (View::Grid, "▦  Grid")] {
@@ -1580,10 +1584,10 @@ impl egui::Widget for Btn {
         use BtnKind::*;
         let enabled = ui.is_enabled();
         let (font, pad_x, h, radius, min_w) = match self.kind {
-            Primary => (bold(13.0), 12.0, 28.0, 7.0, 0.0),
-            Ghost | Danger => (egui::FontId::proportional(13.0), 12.0, 28.0, 7.0, 0.0),
-            Icon => (egui::FontId::proportional(13.0), 5.0, 22.0, 5.0, 22.0),
-            Segment(_) => (egui::FontId::proportional(13.0), 12.0, 24.0, 6.0, 70.0),
+            Primary => (bold(12.5), 9.0, 24.0, 6.0, 0.0),
+            Ghost | Danger => (egui::FontId::proportional(12.5), 9.0, 24.0, 6.0, 0.0),
+            Icon => (egui::FontId::proportional(12.5), 4.0, 20.0, 4.0, 20.0),
+            Segment(_) => (egui::FontId::proportional(12.0), 9.0, 20.0, 5.0, 58.0),
         };
         let galley = ui.painter().layout_no_wrap(self.text, font, Color32::PLACEHOLDER);
         let size = Vec2::new((galley.size().x + pad_x * 2.0).max(min_w), h);
@@ -1728,7 +1732,7 @@ fn empty_state(ui: &mut egui::Ui, actions: &mut Vec<Action>, folder: &mut String
         ui.add_space(2.0);
         ui.label(RichText::new("Pick an app to open your first agent's terminal.").color(MUTED));
         ui.add_space(16.0);
-        ui.allocate_ui(Vec2::new(300.0, 0.0), |ui| {
+        ui.allocate_ui(Vec2::new(260.0, 0.0), |ui| {
             if let Some(p) = new_agent_menu(ui, folder) {
                 actions.push(Action::Create(p));
             }
@@ -1739,7 +1743,7 @@ fn empty_state(ui: &mut egui::Ui, actions: &mut Vec<Action>, folder: &mut String
 /// The "new agent" picker: one row per app (icon + name). Clicking a row
 /// creates the agent and opens its terminal straight away.
 fn new_agent_menu(ui: &mut egui::Ui, folder: &mut String) -> Option<Provider> {
-    ui.set_width(300.0);
+    ui.set_width(260.0);
     let folder_ok = folder.trim().is_empty() || std::path::Path::new(folder.trim()).is_dir();
     let mut picked = None;
     for p in Provider::ALL {
@@ -1758,7 +1762,7 @@ fn new_agent_menu(ui: &mut egui::Ui, folder: &mut String) -> Option<Provider> {
         egui::TextEdit::singleline(folder)
             .hint_text("home folder")
             .desired_width(f32::INFINITY)
-            .margin(Margin::symmetric(8, 5)),
+            .margin(Margin::symmetric(6, 3)),
     );
     if !folder_ok {
         ui.label(RichText::new("Folder not found").small().color(RED));
@@ -1767,23 +1771,23 @@ fn new_agent_menu(ui: &mut egui::Ui, folder: &mut String) -> Option<Provider> {
 }
 
 fn app_row(ui: &mut egui::Ui, p: Provider, sub: &str, enabled: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
     let painter = ui.painter();
     if resp.hovered() && enabled {
-        painter.rect_filled(rect, 8.0, HOVER);
+        painter.rect_filled(rect, 6.0, HOVER);
     }
-    let icon = egui::Rect::from_min_size(rect.min + Vec2::new(8.0, 8.0), Vec2::splat(30.0));
+    let icon = egui::Rect::from_min_size(rect.min + Vec2::new(6.0, 7.0), Vec2::splat(22.0));
     draw_app_icon(painter, icon, p);
-    let x = icon.right() + 12.0;
+    let x = icon.right() + 9.0;
     let name_color = if enabled { TEXT } else { FAINT };
-    painter.text(egui::pos2(x, rect.top() + 7.0), egui::Align2::LEFT_TOP, p.label(), bold(14.0), name_color);
-    painter.text(egui::pos2(x, rect.top() + 26.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(11.5), MUTED);
+    painter.text(egui::pos2(x, rect.top() + 4.0), egui::Align2::LEFT_TOP, p.label(), bold(12.5), name_color);
+    painter.text(egui::pos2(x, rect.top() + 20.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(10.5), MUTED);
     if resp.hovered() && enabled {
         painter.text(
-            egui::pos2(rect.right() - 10.0, rect.center().y),
+            egui::pos2(rect.right() - 8.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             "Open ›",
-            egui::FontId::proportional(12.0),
+            egui::FontId::proportional(11.5),
             p.color(),
         );
     }

@@ -10,6 +10,7 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use eframe::egui::{self, Align2, Color32, EventFilter, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2};
+use std::path::Path;
 
 const PAD: f32 = 6.0;
 
@@ -20,7 +21,8 @@ pub struct TermViewOutput {
 }
 
 /// Draw the terminal into the whole available rect and handle input when focused.
-pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: f32) -> TermViewOutput {
+/// `cwd` resolves relative file paths for Ctrl+click.
+pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: f32, cwd: &Path) -> TermViewOutput {
     let font = FontId::monospace(font_size);
     let (cw, ch) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let ch = ch.ceil();
@@ -56,6 +58,22 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
     let mouse_mode = mode.intersects(TermMode::MOUSE_MODE) && mode.contains(TermMode::SGR_MOUSE);
     let shift_held = ui.input(|i| i.modifiers.shift);
 
+    // ---------- Ctrl+click: open URLs and file paths ----------
+    let ctrl_held = ui.input(|i| i.modifiers.ctrl);
+    let mut link: Option<(usize, usize, usize)> = None; // (row, first col, last col)
+    if ctrl_held && response.hovered() {
+        if let Some(pos) = response.hover_pos() {
+            let (point, _, col, row) = cell_at(pos, display_offset);
+            if let Some((c0, c1, target)) = link_at(&row_chars(sess, point.line), col, cwd) {
+                link = Some((row, c0, c1));
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if response.clicked() {
+                    open_target(&target);
+                }
+            }
+        }
+    }
+
     if response.hovered() {
         let scroll = ui.input(|i| i.raw_scroll_delta.y);
         if scroll != 0.0 {
@@ -84,7 +102,7 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
         }
     }
 
-    if mouse_mode && !shift_held {
+    if mouse_mode && !shift_held && link.is_none() {
         // Forward clicks/drags to the app (OpenCode's TUI uses the mouse).
         let pressed = ui.input(|i| i.pointer.primary_pressed());
         let released = ui.input(|i| i.pointer.primary_released());
@@ -188,7 +206,96 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
     }
 
     paint(ui, sess, rect, inner, &font, cw, ch, focused);
+    if let Some((row, c0, c1)) = link {
+        let y = inner.top() + (row as f32 + 1.0) * ch - 1.0;
+        let x0 = inner.left() + c0 as f32 * cw;
+        let x1 = inner.left() + (c1 + 1) as f32 * cw;
+        ui.painter_at(rect).line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(1.5_f32, theme::ACCENT));
+    }
     TermViewOutput { response, typed }
+}
+
+/// Characters of one grid line (viewport-relative `Line`, as `cell_at` returns).
+fn row_chars(sess: &TermSession, line: Line) -> Vec<char> {
+    let t = sess.term.lock();
+    let g = t.grid();
+    if line.0 < -(g.history_size() as i32) || line.0 >= g.screen_lines() as i32 {
+        return Vec::new();
+    }
+    let row = &g[line];
+    (0..g.columns()).map(|c| row[Column(c)].c).collect()
+}
+
+/// The URL or existing file path under column `col`, as (first col, last col, target).
+/// Paths may carry a `:line[:col]` suffix and may be relative to `cwd` or start with `~`.
+pub fn link_at(chars: &[char], col: usize, cwd: &Path) -> Option<(usize, usize, String)> {
+    let is_sep = |c: char| c.is_whitespace() || "\"'`<>()[]{}|│,".contains(c);
+    if col >= chars.len() || is_sep(chars[col]) {
+        return None;
+    }
+    let mut s = col;
+    while s > 0 && !is_sep(chars[s - 1]) {
+        s -= 1;
+    }
+    let mut e = col;
+    while e + 1 < chars.len() && !is_sep(chars[e + 1]) {
+        e += 1;
+    }
+    let mut token: String = chars[s..=e].iter().collect();
+    while token.len() > 1 && token.ends_with(['.', ';', ':', '!', '?']) {
+        token.pop();
+        e -= 1;
+    }
+    if col > e {
+        return None;
+    }
+    if token.starts_with("https://") || token.starts_with("http://") {
+        return Some((s, e, token));
+    }
+    let path = strip_line_suffix(&token);
+    if !(path.contains('\\') || path.contains('/') || path.contains('.')) {
+        return None;
+    }
+    let expanded = match path.strip_prefix('~') {
+        Some(rest) => format!("{}{}", std::env::var("USERPROFILE").unwrap_or_default(), rest),
+        None => path.to_string(),
+    };
+    let p = Path::new(&expanded);
+    let full = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    full.exists().then(|| (s, e, full.to_string_lossy().into_owned()))
+}
+
+/// "src/main.rs:12:5" -> "src/main.rs" (a drive's "C:" is kept).
+fn strip_line_suffix(token: &str) -> &str {
+    let mut t = token;
+    for _ in 0..2 {
+        match t.rsplit_once(':') {
+            Some((head, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => t = head,
+            _ => break,
+        }
+    }
+    t
+}
+
+/// Open a URL or file with its default app. Programs and scripts are only
+/// revealed in Explorer, never run.
+fn open_target(target: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const NO_WINDOW: u32 = 0x0800_0000;
+        const RUNNABLE: &[&str] = &["exe", "bat", "cmd", "com", "ps1", "vbs", "js", "msi", "lnk", "scr", "pif", "jar", "reg", "hta"];
+        let is_url = target.starts_with("http://") || target.starts_with("https://");
+        let ext = Path::new(target).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let _ = if !is_url && RUNNABLE.contains(&ext.as_str()) {
+            std::process::Command::new("explorer").arg(format!("/select,{target}")).spawn()
+        } else {
+            std::process::Command::new("rundll32")
+                .args(["url.dll,FileProtocolHandler", target])
+                .creation_flags(NO_WINDOW)
+                .spawn()
+        };
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -212,10 +319,14 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
         row: i32,
         col: usize,
         fg: Color32,
+        bold: bool,
         underline: bool,
         strike: bool,
         text: String,
     }
+    // Bold = the same glyphs drawn again a hair to the right: real weight,
+    // identical width, so columns stay aligned.
+    const BOLD_SHIFT: f32 = 0.7;
     let mut run: Option<Run> = None;
     // Background run.
     let mut bg_run: Option<(i32, usize, usize, Color32)> = None;
@@ -228,6 +339,9 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
             }
             let p = pos_of(r.row, r.col);
             painter.text(p, Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
+            if r.bold {
+                painter.text(p + Vec2::new(BOLD_SHIFT, 0.0), Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
+            }
             let w = r.text.chars().count() as f32 * cw;
             if r.underline {
                 let y = p.y + ch - 1.5;
@@ -260,7 +374,8 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
         }
         let width = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
 
-        let mut fg = resolve(cell.fg, colors, cell.flags.contains(Flags::BOLD));
+        let bold = cell.flags.contains(Flags::BOLD);
+        let mut fg = resolve(cell.fg, colors, false);
         let mut bg = resolve(cell.bg, colors, false);
         if cell.flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
@@ -298,12 +413,19 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
         let zw = cell.zerowidth().filter(|z| !z.is_empty());
         if c.is_ascii() && zw.is_none() {
             match &mut run {
-                Some(r) if r.row == row && r.col + r.text.len() == col && r.fg == fg && r.underline == underline && r.strike == strike => {
+                Some(r)
+                    if r.row == row
+                        && r.col + r.text.len() == col
+                        && r.fg == fg
+                        && r.bold == bold
+                        && r.underline == underline
+                        && r.strike == strike =>
+                {
                     r.text.push(c)
                 }
                 _ => {
                     flush(&mut run);
-                    run = Some(Run { row, col, fg, underline, strike, text: c.to_string() });
+                    run = Some(Run { row, col, fg, bold, underline, strike, text: c.to_string() });
                 }
             }
         } else if let Some(rects) = zw.is_none().then(|| block_rects(c)).flatten() {
@@ -328,6 +450,9 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
             let p = pos_of(row, col);
             // Center the glyph in its cell(s); fallback fonts may be wider/narrower.
             let center = Pos2::new(p.x + width as f32 * cw / 2.0, p.y);
+            if bold {
+                painter.text(center + Vec2::new(BOLD_SHIFT, 0.0), Align2::CENTER_TOP, &s, font.clone(), fg);
+            }
             painter.text(center, Align2::CENTER_TOP, s, font.clone(), fg);
         }
 
@@ -559,5 +684,40 @@ mod block_tests {
         assert_eq!(block_rects('▒').unwrap().1, 0.5);
         assert!(block_rects('a').is_none());
         assert!(block_rects('─').is_none());
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::{link_at, strip_line_suffix};
+    use std::path::Path;
+
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    #[test]
+    fn finds_urls() {
+        let line = chars("see https://example.com/docs. for more");
+        let (s, e, t) = link_at(&line, 10, Path::new(".")).unwrap();
+        assert_eq!(t, "https://example.com/docs");
+        assert_eq!((s, e), (4, 27));
+        assert!(link_at(&line, 1, Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn finds_existing_paths_relative_to_cwd() {
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let line = chars("  ⎿ edited src/main.rs:12:5 ok");
+        let (_, _, t) = link_at(&line, 14, cwd).unwrap();
+        assert!(t.ends_with("main.rs"), "{t}");
+        assert!(link_at(&chars("nope/missing.rs"), 3, cwd).is_none());
+    }
+
+    #[test]
+    fn line_suffixes() {
+        assert_eq!(strip_line_suffix("a.rs:12:5"), "a.rs");
+        assert_eq!(strip_line_suffix(r"C:\x\a.rs:7"), r"C:\x\a.rs");
+        assert_eq!(strip_line_suffix("C:"), "C:");
     }
 }

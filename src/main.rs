@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod agent;
+mod icon;
 mod runner;
 mod term;
 mod term_view;
@@ -10,7 +11,7 @@ mod theme;
 mod live_tests;
 
 use agent::{Agent, Permission, Provider, State, Usage};
-use eframe::egui::{self, Align, Color32, Key, Layout, Margin, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align, Color32, CornerRadius, Key, Layout, Margin, RichText, Sense, Stroke, Vec2};
 use runner::ClaudeTracker;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Kennel")
+            .with_icon(egui::IconData { rgba: icon::icon_rgba(64), width: 64, height: 64 })
             .with_inner_size([1040.0, 620.0])
             .with_min_inner_size([720.0, 440.0]),
         renderer: eframe::Renderer::Glow,
@@ -102,6 +104,11 @@ struct Live {
     started: Instant,
     /// Resumed Claude conversation: auto-answer its trust prompt for this folder.
     pending_trust: Option<String>,
+    /// `line_mark` when you last had this agent on screen (unread = new lines since).
+    seen_mark: usize,
+    /// Status shown last frame, and since when (for "Working for 2m").
+    shown: Status,
+    since: Instant,
 }
 
 enum Bg {
@@ -174,7 +181,16 @@ struct App {
     new_folder: String,
     toasts: Vec<(Instant, String)>,
     actions: Vec<Action>,
+    /// Grid column widths / row heights as fractions (each list sums to 1).
+    grid_cols: Vec<f32>,
+    grid_rows: Vec<f32>,
+    /// What the central area shows, and when that last changed (for the fade).
+    view_key: (View, Option<u64>),
+    view_changed: Instant,
 }
+
+/// Length of the fade when switching views or agents.
+const FADE: f32 = 0.16;
 
 fn term_id(agent_id: u64) -> egui::Id {
     egui::Id::new(("term", agent_id))
@@ -211,7 +227,21 @@ impl App {
             new_folder,
             toasts: Vec::new(),
             actions: Vec::new(),
+            grid_cols: Vec::new(),
+            grid_rows: Vec::new(),
+            view_key: (View::Focus, selected),
+            view_changed: Instant::now() - Duration::from_secs(1),
         }
+    }
+
+    /// New output lines since you last had this agent on screen.
+    fn unread(&self, id: u64) -> usize {
+        self.live.get(&id).map_or(0, |l| l.sess.line_mark().saturating_sub(l.seen_mark))
+    }
+
+    /// How long the agent has been in its current status.
+    fn status_age(&self, id: u64) -> Option<Duration> {
+        self.live.get(&id).map(|l| l.since.elapsed())
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -289,6 +319,9 @@ impl App {
                 final_polled: false,
                 started: Instant::now(),
                 pending_trust,
+                seen_mark: 0,
+                shown: Status::Starting,
+                since: Instant::now(),
             },
         );
         self.focus_term = Some(id);
@@ -386,10 +419,22 @@ impl App {
         self.scan_prompts();
         let focused_term = ctx.memory(|m| m.focused());
         let ids: Vec<u64> = self.live.keys().copied().collect();
+        let on_screen = |id: u64| match self.view {
+            View::Focus => self.selected == Some(id),
+            View::Grid => true,
+        };
+        let visible: HashSet<u64> = ids.iter().copied().filter(|id| on_screen(*id)).collect();
         for id in ids {
             let status = self.status(id);
             let focused = focused_term == Some(term_id(id));
             let l = self.live.get_mut(&id).unwrap();
+            if status != l.shown {
+                l.shown = status;
+                l.since = Instant::now();
+            }
+            if visible.contains(&id) {
+                l.seen_mark = l.sess.line_mark();
+            }
             let working = status == Status::Working;
             let asking = status == Status::Asking;
             let finished_turn = l.was_working && matches!(status, Status::Waiting | Status::Asking);
@@ -521,6 +566,11 @@ impl App {
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 0)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
+                    let tip = if self.state.settings.sidebar_hidden { "Show sidebar (Ctrl+Shift+B)" } else { "Hide sidebar (Ctrl+Shift+B)" };
+                    if ui.add(icon_button("☰")).on_hover_text(tip).clicked() {
+                        self.state.settings.sidebar_hidden = !self.state.settings.sidebar_hidden;
+                        self.dirty = true;
+                    }
                     logo(ui);
                     ui.label(RichText::new("Kennel").font(bold(16.0)));
                     ui.add_space(18.0);
@@ -568,6 +618,9 @@ impl App {
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
+        if self.state.settings.sidebar_hidden {
+            return;
+        }
         egui::SidePanel::left("sidebar")
             .resizable(true)
             .default_width(210.0)
@@ -671,6 +724,8 @@ impl App {
         attention: bool,
     ) -> (egui::Rect, Option<egui::Response>) {
         let renaming = self.renaming.as_ref().is_some_and(|(id, _)| *id == a.id);
+        let unread = self.unread(a.id);
+        let age = self.status_age(a.id);
         let inner = egui::Frame::new()
             .fill(if selected { RAISED } else { PANEL })
             .stroke(Stroke::new(1.0_f32, if selected { Color32::from_rgb(0x34, 0x3B, 0x50) } else { Color32::TRANSPARENT }))
@@ -689,7 +744,8 @@ impl App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.label(RichText::new(format!("${:.2}", a.total_usage().cost_usd)).small().color(FAINT));
-                        status_indicator(ui, status, false);
+                        status_indicator(ui, status, false, age);
+                        unread_badge(ui, unread);
                         if attention {
                             let (r, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
                             ui.painter().circle_filled(r.center(), 3.0, AMBER);
@@ -710,7 +766,11 @@ impl App {
         } else if resp.hovered() && !selected && self.dragging.is_none() {
             ui.painter().rect_filled(rect, 6.0, Color32::from_white_alpha(6));
         }
-        let resp = if self.dragging.is_none() { resp.on_hover_text("Double-click to rename · drag to reorder") } else { resp };
+        let resp = if self.dragging.is_none() {
+            resp.on_hover_text(format!("{}\n\nDouble-click to rename · drag to reorder", agent_info(a)))
+        } else {
+            resp
+        };
         (rect, Some(resp))
     }
 
@@ -745,23 +805,95 @@ impl App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(6)))
             .show(ctx, |ui| {
+                let area = ui.max_rect();
                 if self.state.agents.is_empty() {
                     empty_state(ui, &mut self.actions, &mut self.new_folder);
                     return;
+                }
+                let key = (self.view, if self.view == View::Focus { self.selected } else { None });
+                if key != self.view_key {
+                    self.view_key = key;
+                    self.view_changed = Instant::now();
                 }
                 match self.view {
                     View::Focus => self.focus_view(ui),
                     View::Grid => self.grid_view(ui),
                 }
+                // Fade the new content in: a background-colored veil that clears quickly.
+                let t = self.view_changed.elapsed().as_secs_f32() / FADE;
+                if t < 1.0 {
+                    let veil = (1.0 - t).powi(2);
+                    ui.painter().rect_filled(area.expand(6.0), 0.0, BG.gamma_multiply(veil));
+                    ui.ctx().request_repaint();
+                }
             });
     }
 
     fn focus_view(&mut self, ui: &mut egui::Ui) {
+        self.tab_strip(ui);
+        ui.add_space(4.0);
         let Some(id) = self.selected.filter(|id| self.state.agent(*id).is_some()) else {
             ui.centered_and_justified(|ui| ui.label(RichText::new("Select an agent").color(MUTED)));
             return;
         };
         self.agent_pane(ui, id, false);
+    }
+
+    /// Browser-style tabs, one per agent (Focus view).
+    fn tab_strip(&mut self, ui: &mut egui::Ui) {
+        let agents = self.state.agents.clone();
+        egui::ScrollArea::horizontal()
+            .id_salt("tabs")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for a in &agents {
+                        let selected = self.selected == Some(a.id);
+                        let status = self.status(a.id);
+                        let unread = if selected { 0 } else { self.unread(a.id) };
+                        let attention = self.attention.contains(&a.id);
+                        let age = self.status_age(a.id);
+                        let inner = egui::Frame::new()
+                            .fill(if selected { PANEL } else { Color32::TRANSPARENT })
+                            .stroke(Stroke::new(1.0_f32, if selected { BORDER } else { Color32::TRANSPARENT }))
+                            .corner_radius(CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 })
+                            .inner_margin(Margin { left: 9, right: 9, top: 5, bottom: 5 })
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    app_icon(ui, a.provider, 13.0);
+                                    let color = if selected { TEXT } else { MUTED };
+                                    ui.add(egui::Label::new(RichText::new(&a.name).font(bold(12.5)).color(color)).selectable(false));
+                                    status_indicator(ui, status, false, age);
+                                    unread_badge(ui, unread);
+                                    if attention && !selected {
+                                        let (r, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
+                                        ui.painter().circle_filled(r.center(), 3.0, AMBER);
+                                    }
+                                });
+                            });
+                        let rect = inner.response.rect;
+                        let resp = ui.interact(rect, egui::Id::new(("tab", a.id)), Sense::click());
+                        if selected {
+                            let y = rect.bottom() - 1.0;
+                            ui.painter().line_segment(
+                                [egui::pos2(rect.left() + 6.0, y), egui::pos2(rect.right() - 6.0, y)],
+                                Stroke::new(2.0_f32, a.provider.color()),
+                            );
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(rect, 7.0, Color32::from_white_alpha(8));
+                        }
+                        if resp.clicked() {
+                            self.actions.push(Action::Select(a.id));
+                        }
+                        if resp.middle_clicked() && status.alive() {
+                            self.actions.push(Action::Stop(a.id));
+                        }
+                        resp.on_hover_text(agent_info(a));
+                    }
+                });
+            });
     }
 
     fn grid_view(&mut self, ui: &mut egui::Ui) {
@@ -775,17 +907,58 @@ impl App {
         let n = ids.len();
         let cols = (n as f32).sqrt().ceil() as usize;
         let rows = n.div_ceil(cols);
+        if self.grid_cols.len() != cols {
+            self.grid_cols = vec![1.0 / cols as f32; cols];
+        }
+        if self.grid_rows.len() != rows {
+            self.grid_rows = vec![1.0 / rows as f32; rows];
+        }
         let gap = 6.0;
         let area = ui.available_rect_before_wrap();
-        let tile_w = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
-        let tile_h = (area.height() - gap * (rows as f32 - 1.0)) / rows as f32;
         ui.allocate_rect(area, Sense::hover());
+        let avail_w = area.width() - gap * (cols as f32 - 1.0);
+        let avail_h = area.height() - gap * (rows as f32 - 1.0);
+        let xs = offsets(&self.grid_cols, avail_w, gap, area.left());
+        let ys = offsets(&self.grid_rows, avail_h, gap, area.top());
+
         for (i, id) in ids.into_iter().enumerate() {
             let (c, r) = (i % cols, i / cols);
-            let min = area.min + Vec2::new(c as f32 * (tile_w + gap), r as f32 * (tile_h + gap));
-            let rect = egui::Rect::from_min_size(min, Vec2::new(tile_w, tile_h));
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(xs[c], ys[r]),
+                Vec2::new(self.grid_cols[c] * avail_w, self.grid_rows[r] * avail_h),
+            );
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
             self.agent_pane(&mut child, id, true);
+        }
+
+        // Draggable dividers between columns and between rows (double-click resets).
+        for c in 0..cols.saturating_sub(1) {
+            let x = xs[c + 1] - gap / 2.0;
+            let hit = egui::Rect::from_x_y_ranges(x - gap / 2.0..=x + gap / 2.0, area.y_range());
+            let resp = ui.interact(hit, egui::Id::new(("col_div", c)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            if resp.dragged() {
+                resize_pair(&mut self.grid_cols, c, resp.drag_delta().x / avail_w);
+            }
+            if resp.double_clicked() {
+                self.grid_cols = vec![1.0 / cols as f32; cols];
+            }
+            if resp.hovered() || resp.dragged() {
+                ui.painter().vline(x, area.y_range(), Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.7)));
+            }
+        }
+        for r in 0..rows.saturating_sub(1) {
+            let y = ys[r + 1] - gap / 2.0;
+            let hit = egui::Rect::from_x_y_ranges(area.x_range(), y - gap / 2.0..=y + gap / 2.0);
+            let resp = ui.interact(hit, egui::Id::new(("row_div", r)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
+            if resp.dragged() {
+                resize_pair(&mut self.grid_rows, r, resp.drag_delta().y / avail_h);
+            }
+            if resp.double_clicked() {
+                self.grid_rows = vec![1.0 / rows as f32; rows];
+            }
+            if resp.hovered() || resp.dragged() {
+                ui.painter().hline(area.x_range(), y, Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.7)));
+            }
         }
     }
 
@@ -793,6 +966,8 @@ impl App {
     fn agent_pane(&mut self, ui: &mut egui::Ui, id: u64, in_grid: bool) {
         let Some(a) = self.state.agent(id).cloned() else { return };
         let status = self.status(id);
+        let age = self.status_age(id);
+        let context = self.live.get(&id).and_then(|l| l.claude.as_ref()).and_then(|t| t.context_pct);
         let focused = ui.memory(|m| m.has_focus(term_id(id)));
         let border = if focused {
             a.provider.color().gamma_multiply(0.85)
@@ -808,17 +983,31 @@ impl App {
             .inner_margin(Margin::same(3))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
+                // Empty space in the title row: double-click to maximize / restore.
+                let title_rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 26.0));
+                let title_bg = ui.interact(title_rect, egui::Id::new(("title", id)), Sense::click());
+                if title_bg.double_clicked() {
+                    if in_grid {
+                        self.actions.push(Action::OpenFocus(id));
+                    } else {
+                        self.view = View::Grid;
+                    }
+                }
                 ui.horizontal(|ui| {
                     ui.set_height(26.0);
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.add_space(4.0);
                     app_icon(ui, a.provider, 16.0);
                     self.name_widget(ui, &a, 13.5);
-                    status_indicator(ui, status, true);
+                    status_indicator(ui, status, true, age);
                     let u = a.session_usage;
                     ui.label(
                         RichText::new(format!("${:.4} · {} tok", u.cost_usd, fmt_tokens(u.total_tokens()))).small().color(FAINT),
                     );
+                    if let Some(p) = context {
+                        ui.label(RichText::new(format!("ctx {p:.0}%")).small().color(context_color(p)))
+                            .on_hover_text("How full this conversation's context window is");
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         let more = ui.add(icon_button("⋯")).on_hover_text("More");
@@ -856,8 +1045,13 @@ impl App {
                                 ui.close_menu();
                             }
                         });
-                        if in_grid && ui.add(icon_button("⤢")).on_hover_text("Open in focus view").clicked() {
-                            self.actions.push(Action::OpenFocus(id));
+                        let (icon, tip) = if in_grid { ("⤢", "Maximize (or double-click the title)") } else { ("⤡", "Back to grid (or double-click the title)") };
+                        if ui.add(icon_button(icon)).on_hover_text(tip).clicked() {
+                            if in_grid {
+                                self.actions.push(Action::OpenFocus(id));
+                            } else {
+                                self.view = View::Grid;
+                            }
                         }
                         if status.alive() {
                             if ui.add(icon_button("■")).on_hover_text("Stop").clicked() {
@@ -871,6 +1065,15 @@ impl App {
                         }
                     });
                 });
+                if let Some(p) = context {
+                    // Thin context gauge under the title.
+                    let (bar, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
+                    let bar = bar.shrink2(Vec2::new(4.0, 0.0));
+                    ui.painter().rect_filled(bar, 1.5, BORDER);
+                    let fill = egui::Rect::from_min_size(bar.min, Vec2::new(bar.width() * (p / 100.0).clamp(0.0, 1.0), bar.height()));
+                    ui.painter().rect_filled(fill, 1.5, context_color(p));
+                    resp.on_hover_text(format!("Context {p:.0}% used"));
+                }
                 egui::Frame::new().fill(TERM_BG).corner_radius(6).inner_margin(Margin::same(2)).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     self.terminal_or_placeholder(ui, id, status, &a);
@@ -896,7 +1099,7 @@ impl App {
         }
         let resp = ui
             .add(egui::Label::new(RichText::new(&a.name).font(bold(size))).sense(Sense::click()).selectable(false))
-            .on_hover_text("Double-click to rename");
+            .on_hover_text(format!("{}\n\nDouble-click to rename", agent_info(a)));
         if resp.double_clicked() {
             self.begin_rename(a.id);
         }
@@ -934,7 +1137,11 @@ impl App {
                 ui.memory_mut(|m| m.request_focus(term_id(id)));
                 self.focus_term = None;
             }
-            let out = term_view::show(ui, &mut l.sess, term_id(id), font_size);
+            let cwd = match a.cwd.trim() {
+                "" => PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()),
+                c => PathBuf::from(c),
+            };
+            let out = term_view::show(ui, &mut l.sess, term_id(id), font_size, &cwd);
             if out.typed {
                 l.interacted = true;
             }
@@ -1278,6 +1485,10 @@ impl App {
             if i.consume_key(cs, Key::N) {
                 self.actions.push(Action::NewAgent);
             }
+            if i.consume_key(cs, Key::B) {
+                self.state.settings.sidebar_hidden = !self.state.settings.sidebar_hidden;
+                self.dirty = true;
+            }
             let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             for (n, k) in digits.into_iter().enumerate() {
                 if i.consume_key(cs, k) {
@@ -1457,21 +1668,26 @@ fn question_badge(ui: &mut egui::Ui) -> egui::Response {
     resp
 }
 
-fn status_indicator(ui: &mut egui::Ui, s: Status, label: bool) {
-    if s == Status::Working {
-        working_pulse(ui);
-        return;
-    }
-    let dot = if s == Status::Asking { question_badge(ui) } else { status_dot(ui, s) };
-    if label {
-        ui.label(RichText::new(s.label()).small().color(s.color()));
-    } else {
-        dot.on_hover_text(s.label());
+/// Status as a dot (plus label if `label`), a pulse while working, or a "?"
+/// badge when waiting on you. Hover shows how long it has been in that state.
+fn status_indicator(ui: &mut egui::Ui, s: Status, label: bool, age: Option<Duration>) {
+    let tip = match age {
+        Some(d) if s.alive() => format!("{} for {}", s.label(), fmt_dur(d)),
+        _ => s.label(),
+    };
+    let mark = match s {
+        Status::Working => working_pulse(ui),
+        Status::Asking => question_badge(ui),
+        _ => status_dot(ui, s),
+    };
+    mark.on_hover_text(&tip);
+    if label && s != Status::Working {
+        ui.label(RichText::new(s.label()).small().color(s.color())).on_hover_text(tip);
     }
 }
 
 /// Three tiny dots pulsing in sequence.
-fn working_pulse(ui: &mut egui::Ui) {
+fn working_pulse(ui: &mut egui::Ui) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(15.0, 8.0), Sense::hover());
     let t = ui.input(|i| i.time) as f32;
     let painter = ui.painter();
@@ -1480,9 +1696,9 @@ fn working_pulse(ui: &mut egui::Ui) {
         let center = egui::pos2(rect.left() + 2.5 + i as f32 * 5.0, rect.center().y - k);
         painter.circle_filled(center, 1.6, GREEN.gamma_multiply(0.3 + 0.7 * k));
     }
-    resp.on_hover_text("Working");
     // ~30 fps, and only while something is working.
     ui.ctx().request_repaint_after(Duration::from_millis(33));
+    resp
 }
 
 fn status_dot(ui: &mut egui::Ui, s: Status) -> egui::Response {
@@ -1654,5 +1870,102 @@ mod trust_tests {
         assert!(same_folder("c:/users/user/", r"C:\Users\User"));
         assert!(!same_folder(r" C:\Users\User\other", r"C:\Users\User"));
         assert!(!same_folder("Accessing workspace:", r"C:\Users\User"));
+    }
+}
+
+/// Left/top edge of each grid track, given their fractions of `avail` space.
+fn offsets(fracs: &[f32], avail: f32, gap: f32, start: f32) -> Vec<f32> {
+    let mut out = Vec::with_capacity(fracs.len());
+    let mut pos = start;
+    for f in fracs {
+        out.push(pos);
+        pos += f * avail + gap;
+    }
+    out
+}
+
+/// Move the border between tracks `i` and `i + 1` by `delta` (a fraction of the
+/// total), keeping both at least `MIN` of the space.
+fn resize_pair(fracs: &mut [f32], i: usize, delta: f32) {
+    const MIN: f32 = 0.12;
+    let total = fracs[i] + fracs[i + 1];
+    let a = (fracs[i] + delta).clamp(MIN, (total - MIN).max(MIN));
+    fracs[i] = a;
+    fracs[i + 1] = total - a;
+}
+
+fn context_color(pct: f32) -> Color32 {
+    if pct >= 85.0 {
+        RED
+    } else if pct >= 60.0 {
+        AMBER
+    } else {
+        GREEN
+    }
+}
+
+/// Hover card for an agent: where it runs and how.
+fn agent_info(a: &Agent) -> String {
+    let folder = if a.cwd.trim().is_empty() { "home folder" } else { a.cwd.trim() };
+    let model = match a.provider {
+        Provider::OpenCode => "picked in OpenCode (/models)",
+        Provider::Claude if a.model.trim().is_empty() => "default",
+        Provider::Claude => a.model.trim(),
+    };
+    let session = a.session_id.as_deref().map(|s| s.chars().take(13).collect::<String>() + "…").unwrap_or_else(|| "new".into());
+    format!(
+        "{}\nFolder: {folder}\nModel: {model}\nPermissions: {}\nSession: {session}",
+        a.provider.label(),
+        a.permission.label()
+    )
+}
+
+/// Count of new output lines on an agent you're not looking at.
+fn unread_badge(ui: &mut egui::Ui, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let text = if n > 99 { "99+".to_string() } else { n.to_string() };
+    let galley = ui.painter().layout_no_wrap(text, egui::FontId::proportional(10.0), Color32::WHITE);
+    let size = Vec2::new((galley.size().x + 8.0).max(16.0), 14.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, 7.0, ACCENT.gamma_multiply(0.85));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    resp.on_hover_text(format!("{n} new line{} since you last looked", if n == 1 { "" } else { "s" }));
+}
+
+/// "42s", "2m 14s", "1h 5m".
+fn fmt_dur(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn resize_keeps_total_and_minimum() {
+        let mut f = vec![0.5, 0.5];
+        resize_pair(&mut f, 0, 0.2);
+        assert!((f[0] - 0.7).abs() < 1e-6 && (f[0] + f[1] - 1.0).abs() < 1e-6);
+        resize_pair(&mut f, 0, 0.9);
+        assert!((f[1] - 0.12).abs() < 1e-6);
+    }
+
+    #[test]
+    fn offsets_include_gaps() {
+        assert_eq!(offsets(&[0.5, 0.5], 100.0, 6.0, 10.0), vec![10.0, 66.0]);
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(fmt_dur(Duration::from_secs(42)), "42s");
+        assert_eq!(fmt_dur(Duration::from_secs(134)), "2m 14s");
+        assert_eq!(fmt_dur(Duration::from_secs(3900)), "1h 5m");
     }
 }

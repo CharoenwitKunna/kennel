@@ -324,6 +324,8 @@ pub struct ClaudeTracker {
     /// Latest `cost-state` record (cost + token totals).
     state: Usage,
     status_cost: f64,
+    /// How full the conversation's context window is (0-100), from the status line.
+    pub context_pct: Option<f32>,
     last_live_mtime: Option<SystemTime>,
 }
 
@@ -338,6 +340,7 @@ impl ClaudeTracker {
             per_message: HashMap::new(),
             state: Usage::default(),
             status_cost: 0.0,
+            context_pct: None,
             last_live_mtime: None,
         }
     }
@@ -404,6 +407,9 @@ impl ClaudeTracker {
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
         if v["session_id"].as_str().is_some_and(|s| s != self.session_id) {
             return;
+        }
+        if let Some(p) = v["context_window"]["used_percentage"].as_f64() {
+            self.context_pct = Some(p as f32);
         }
         if let Some(c) = v["cost"]["total_cost_usd"].as_f64() {
             self.status_cost = c;

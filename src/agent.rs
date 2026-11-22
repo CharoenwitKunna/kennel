@@ -174,6 +174,9 @@ pub struct Settings {
     /// conversation started; Claude never remembers trust for the home folder).
     #[serde(default = "yes")]
     pub auto_trust_on_resume: bool,
+    /// Sidebar collapsed (Ctrl+Shift+B / the ☰ button).
+    #[serde(default)]
+    pub sidebar_hidden: bool,
 }
 
 fn yes() -> bool {
@@ -192,6 +195,7 @@ impl Default for Settings {
             font_size: default_font_size(),
             last_folder: String::new(),
             auto_trust_on_resume: true,
+            sidebar_hidden: false,
         }
     }
 }

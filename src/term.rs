@@ -241,6 +241,14 @@ impl TermSession {
         is_busy(&self.shared.activity.lock().unwrap(), now)
     }
 
+    /// Running count of lines this terminal has produced (scrollback plus the
+    /// cursor's row). Differences between two readings = new output lines.
+    pub fn line_mark(&self) -> usize {
+        let t = self.term.lock();
+        let g = t.grid();
+        g.history_size() + g.cursor.point.line.0.max(0) as usize
+    }
+
     pub fn take_bell(&self) -> bool {
         self.shared.bell.swap(false, Ordering::Relaxed)
     }

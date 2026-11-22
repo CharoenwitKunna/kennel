@@ -255,6 +255,25 @@ impl App {
                         .color(MUTED),
                 );
                 ui.add_space(8.0);
+                field_label(ui, "Updates");
+                ui.horizontal(|ui| {
+                    self.dirty |= ui.checkbox(&mut self.state.settings.check_updates, "Check GitHub for new releases").changed();
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let checking = self.update == UpdateState::Checking;
+                        if ui.add_enabled(!checking, ghost_button("Check now")).clicked() {
+                            self.check_for_update(ctx, true);
+                        }
+                        let status = match &self.update {
+                            UpdateState::Checking => "checking…".to_string(),
+                            UpdateState::Available(r) => format!("{} available", r.version),
+                            UpdateState::Installing(v) => format!("downloading {v}…"),
+                            UpdateState::Ready(v) => format!("{v} installed, restart to use"),
+                            UpdateState::Idle => String::new(),
+                        };
+                        ui.label(RichText::new(format!("v{} {status}", update::CURRENT)).small().color(MUTED));
+                    });
+                });
+                ui.add_space(8.0);
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(agent::data_dir().display().to_string()).small().color(MUTED));

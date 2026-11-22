@@ -172,6 +172,9 @@ pub struct Settings {
     /// Lines of history each terminal keeps (applies to newly started agents).
     #[serde(default = "default_scrollback")]
     pub scrollback: usize,
+    /// Look for a newer release on GitHub at launch and every few hours.
+    #[serde(default = "yes")]
+    pub check_updates: bool,
 }
 
 fn yes() -> bool {
@@ -235,6 +238,7 @@ impl Default for Settings {
             auto_trust_on_resume: true,
             sidebar_hidden: false,
             scrollback: default_scrollback(),
+            check_updates: true,
         }
     }
 }

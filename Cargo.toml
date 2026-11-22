@@ -1,6 +1,6 @@
 [package]
 name = "kennel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Kennel: run Claude Code and OpenCode agents side by side in real terminals"
 

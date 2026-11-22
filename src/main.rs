@@ -9,6 +9,7 @@ mod term;
 mod term_view;
 mod theme;
 mod ui;
+mod update;
 mod usage;
 #[cfg(test)]
 mod live_tests;
@@ -32,6 +33,9 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     term::scrub_parent_session_env();
+    if let Ok(exe) = std::env::current_exe() {
+        update::cleanup(&exe);
+    }
     let state = State::load();
     let w = state.layout.width.unwrap_or(1040.0).clamp(720.0, 4096.0);
     let h = state.layout.height.unwrap_or(620.0).clamp(440.0, 2160.0);
@@ -101,8 +105,24 @@ struct Live {
 }
 
 enum Bg {
+    UpdateCheck { result: Result<Option<update::Release>, String>, manual: bool },
+    UpdateInstalled(Result<String, String>),
     OpenCodeUsage { agent_id: u64, session_id: String, usage: Option<Usage> },
 }
+
+/// Where the self-updater is.
+#[derive(Clone, Debug, PartialEq)]
+enum UpdateState {
+    Idle,
+    Checking,
+    Available(update::Release),
+    Installing(String),
+    /// Installed this version; restart to run it.
+    Ready(String),
+}
+
+/// How often to look for a new release while running.
+const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Clone)]
 struct Draft {
@@ -182,6 +202,8 @@ struct App {
     thai_font: bool,
     /// Cached CLI resolution for the Settings window: (claude_input, opencode_input, claude_exe, opencode_exe).
     cli_cache: Option<(String, String, Option<PathBuf>, Option<PathBuf>)>,
+    update: UpdateState,
+    last_update_check: Option<Instant>,
 }
 
 /// Length of the fade when switching views or agents.
@@ -243,6 +265,8 @@ impl App {
             statuses: HashMap::new(),
             thai_font,
             cli_cache: None,
+            update: UpdateState::Idle,
+            last_update_check: None,
         }
     }
 
@@ -271,6 +295,40 @@ impl App {
     /// How long the agent has been in its current status.
     fn status_age(&self, id: u64) -> Option<Duration> {
         self.live.get(&id).map(|l| l.track.since.elapsed())
+    }
+
+    /// Ask GitHub for a newer release in the background.
+    fn check_for_update(&mut self, ctx: &egui::Context, manual: bool) {
+        if matches!(self.update, UpdateState::Checking | UpdateState::Installing(_)) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        self.last_update_check = Some(Instant::now());
+        let (tx, ctx) = (self.bg_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Bg::UpdateCheck { result: update::check(), manual });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Download and swap in the available release.
+    fn install_update(&mut self, ctx: &egui::Context) {
+        let UpdateState::Available(r) = self.update.clone() else { return };
+        self.update = UpdateState::Installing(r.version.clone());
+        let (tx, ctx, exe) = (self.bg_tx.clone(), ctx.clone(), self.self_exe.clone());
+        std::thread::spawn(move || {
+            let result = update::install(&r, &exe).map(|_| r.version.clone());
+            let _ = tx.send(Bg::UpdateInstalled(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Close (saving which agents were running) and start the new version.
+    fn restart_for_update(&mut self, ctx: &egui::Context) {
+        match update::relaunch_after_exit(&self.self_exe) {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.toast(format!("Couldn't restart: {e}. Close and reopen Kennel.")),
+        }
     }
 
     /// Hover text for an agent, with live model/context info while it runs.
@@ -451,7 +509,44 @@ impl App {
                         }
                     }
                 }
+                Bg::UpdateCheck { result, manual } => {
+                    self.update = match result {
+                        Ok(Some(r)) => {
+                            self.toast(format!("Kennel {} is available. Use the Update button at the top.", r.version));
+                            UpdateState::Available(r)
+                        }
+                        Ok(None) => {
+                            if manual {
+                                self.toast(format!("Kennel {} is the latest version", update::CURRENT));
+                            }
+                            UpdateState::Idle
+                        }
+                        Err(e) => {
+                            if manual {
+                                self.toast(format!("Couldn't check for updates: {e}"));
+                            }
+                            UpdateState::Idle
+                        }
+                    };
+                }
+                Bg::UpdateInstalled(result) => match result {
+                    Ok(v) => {
+                        self.toast(format!("Kennel {v} installed. Restart to use it."));
+                        self.update = UpdateState::Ready(v);
+                    }
+                    Err(e) => {
+                        self.toast(format!("Update failed: {e}"));
+                        self.update = UpdateState::Idle;
+                        self.last_update_check = None;
+                    }
+                },
             }
+        }
+        if self.state.settings.check_updates
+            && self.update == UpdateState::Idle
+            && self.last_update_check.is_none_or(|t| t.elapsed() > UPDATE_EVERY)
+        {
+            self.check_for_update(ctx, false);
         }
 
         self.answer_resume_trust();

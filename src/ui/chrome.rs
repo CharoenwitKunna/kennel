@@ -62,6 +62,31 @@ impl App {
                             self.show_settings = !self.show_settings;
                             self.cli_cache = None;
                         }
+                        match self.update.clone() {
+                            UpdateState::Available(r) => {
+                                if ui
+                                    .add(primary_button(&format!("⬆  Update to {}", r.version)))
+                                    .on_hover_text(format!("You have {}. Downloads the new version from GitHub.", update::CURRENT))
+                                    .clicked()
+                                {
+                                    self.install_update(ctx);
+                                }
+                            }
+                            UpdateState::Installing(v) => {
+                                ui.add(egui::Spinner::new().size(14.0));
+                                ui.label(RichText::new(format!("Downloading {v}…")).small().color(MUTED));
+                            }
+                            UpdateState::Ready(v) => {
+                                if ui
+                                    .add(primary_button("↻  Restart to update"))
+                                    .on_hover_text(format!("Restarts into {v}; running agents come back"))
+                                    .clicked()
+                                {
+                                    self.restart_for_update(ctx);
+                                }
+                            }
+                            UpdateState::Idle | UpdateState::Checking => {}
+                        }
                         let running = self.state.agents.iter().filter(|a| self.status(a.id).alive()).count();
                         let stopped: Vec<u64> =
                             self.state.agents.iter().map(|a| a.id).filter(|id| !self.status(*id).alive()).collect();

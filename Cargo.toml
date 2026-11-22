@@ -5,7 +5,7 @@ edition = "2021"
 description = "Kennel: run Claude Code and OpenCode agents side by side in real terminals"
 
 [dependencies]
-alacritty_terminal = "0.25"
+alacritty_terminal = "0.26"
 # glow (OpenGL) renderer instead of wgpu, no accesskit: keeps RSS and binary small
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
 serde = { version = "1", features = ["derive"] }

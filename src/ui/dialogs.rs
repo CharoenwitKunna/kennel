@@ -16,6 +16,9 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .fixed_size([500.0, 0.0])
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height((ctx.screen_rect().height() - 110.0).max(220.0))
+                    .show(ui, |ui| {
                 field_label(ui, "Name");
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.name)
@@ -87,6 +90,23 @@ impl App {
                     ui.label(RichText::new("Folder not found").small().color(RED));
                 }
                 ui.add_space(8.0);
+                egui::CollapsingHeader::new(RichText::new("Instructions (optional)").small().color(MUTED).strong())
+                    .id_salt(("sys_prompt", editing))
+                    .default_open(!draft.system_prompt.trim().is_empty())
+                    .show(ui, |ui| {
+                        let hint = match draft.provider {
+                            Provider::Claude => "Appended to Claude's system prompt (--append-system-prompt)",
+                            Provider::OpenCode => "Sent as the initial prompt on a fresh session (--prompt)",
+                        };
+                        ui.add(
+                            egui::TextEdit::multiline(&mut draft.system_prompt)
+                                .hint_text(hint)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(6, 4)),
+                        );
+                    });
+                ui.add_space(8.0);
                 field_label(ui, "Permissions");
                 for p in Permission::ALL {
                     let selected = draft.permission == p;
@@ -113,7 +133,8 @@ impl App {
                     }
                     ui.add_space(2.0);
                 }
-                ui.add_space(12.0);
+                });
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if running {
                         ui.label(RichText::new("Changes apply on the next start.").small().color(MUTED));
@@ -166,8 +187,22 @@ impl App {
         if !self.show_settings {
             return;
         }
-        let claude = runner::exe_for(Provider::Claude, &self.state.settings);
-        let opencode = runner::exe_for(Provider::OpenCode, &self.state.settings);
+        // Cache PATH/.cmd shim resolution until Settings closes or an input changes.
+        let need_resolve = match &self.cli_cache {
+            Some((c_in, o_in, _, _)) => c_in != &self.state.settings.claude_path || o_in != &self.state.settings.opencode_path,
+            None => true,
+        };
+        if need_resolve {
+            let claude = runner::exe_for(Provider::Claude, &self.state.settings);
+            let opencode = runner::exe_for(Provider::OpenCode, &self.state.settings);
+            self.cli_cache = Some((
+                self.state.settings.claude_path.clone(),
+                self.state.settings.opencode_path.clone(),
+                claude,
+                opencode,
+            ));
+        }
+        let (_, _, claude, opencode) = self.cli_cache.as_ref().unwrap().clone();
         let mut open = true;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -199,7 +234,7 @@ impl App {
                 found_label(ui, &opencode);
                 ui.add_space(8.0);
                 field_label(ui, "Terminal font size");
-                self.dirty |= ui.add(egui::Slider::new(&mut self.state.settings.font_size, 10.0..=20.0).step_by(0.5)).changed();
+                self.dirty |= ui.add(egui::Slider::new(&mut self.state.settings.font_size, 10.0..=22.0).step_by(0.5)).changed();
                 ui.add_space(8.0);
                 field_label(ui, "Scrollback lines per terminal");
                 self.dirty |= ui
@@ -230,6 +265,7 @@ impl App {
             });
         if !open {
             self.show_settings = false;
+            self.cli_cache = None;
         }
     }
 
@@ -292,7 +328,15 @@ impl App {
     }
 
     pub(crate) fn shortcuts(&mut self, ctx: &egui::Context) {
+        let ctrl = egui::Modifiers::CTRL;
         let cs = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+        let focused = ctx.memory(|m| m.focused());
+        let target_agent = self
+            .live
+            .keys()
+            .copied()
+            .find(|id| focused == Some(term_id(*id)))
+            .or(self.selected);
         ctx.input_mut(|i| {
             if i.consume_key(cs, Key::G) {
                 self.view = if self.view == View::Focus { View::Grid } else { View::Focus };
@@ -303,6 +347,38 @@ impl App {
             if i.consume_key(cs, Key::B) {
                 self.state.settings.sidebar_hidden = !self.state.settings.sidebar_hidden;
                 self.dirty = true;
+            }
+            if i.consume_key(cs, Key::F) {
+                if let Some(id) = target_agent {
+                    if let Some(l) = self.live.get_mut(&id) {
+                        l.search.open();
+                    }
+                }
+            }
+            // Terminal font zoom: Ctrl+=/Ctrl++, Ctrl+-, Ctrl+0.
+            if i.consume_key(ctrl, Key::Equals)
+                || i.consume_key(ctrl, Key::Plus)
+                || i.consume_key(cs, Key::Equals)
+                || i.consume_key(cs, Key::Plus)
+            {
+                let next = (self.state.settings.font_size + 1.0).min(22.0);
+                if (next - self.state.settings.font_size).abs() > f32::EPSILON {
+                    self.state.settings.font_size = next;
+                    self.dirty = true;
+                }
+            }
+            if i.consume_key(ctrl, Key::Minus) {
+                let next = (self.state.settings.font_size - 1.0).max(10.0);
+                if (next - self.state.settings.font_size).abs() > f32::EPSILON {
+                    self.state.settings.font_size = next;
+                    self.dirty = true;
+                }
+            }
+            if i.consume_key(ctrl, Key::Num0) {
+                if (self.state.settings.font_size - agent::DEFAULT_FONT_SIZE).abs() > f32::EPSILON {
+                    self.state.settings.font_size = agent::DEFAULT_FONT_SIZE;
+                    self.dirty = true;
+                }
             }
             let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             for (n, k) in digits.into_iter().enumerate() {

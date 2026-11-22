@@ -182,8 +182,47 @@ fn default_scrollback() -> usize {
     crate::term::SCROLLBACK
 }
 
+pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
 fn default_font_size() -> f32 {
-    13.0
+    DEFAULT_FONT_SIZE
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SavedView {
+    #[default]
+    Focus,
+    Grid,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct WindowLayout {
+    #[serde(default)]
+    pub width: Option<f32>,
+    #[serde(default)]
+    pub height: Option<f32>,
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
+    #[serde(default)]
+    pub maximized: bool,
+    #[serde(default)]
+    pub view: SavedView,
+    #[serde(default)]
+    pub sidebar_width: Option<f32>,
+    #[serde(default)]
+    pub grid_cols: Vec<f32>,
+    #[serde(default)]
+    pub grid_rows: Vec<f32>,
+}
+
+impl WindowLayout {
+    pub fn valid_tracks(tracks: &[f32]) -> bool {
+        !tracks.is_empty()
+            && tracks.iter().all(|v| v.is_finite() && *v >= 0.05)
+            && (tracks.iter().sum::<f32>() - 1.0).abs() < 0.05
+    }
 }
 
 impl Default for Settings {
@@ -208,6 +247,8 @@ pub struct State {
     pub agents: Vec<Agent>,
     #[serde(default)]
     pub settings: Settings,
+    #[serde(default)]
+    pub layout: WindowLayout,
 }
 
 pub fn data_dir() -> PathBuf {

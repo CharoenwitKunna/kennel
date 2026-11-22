@@ -60,6 +60,7 @@ impl App {
                         );
                         if ui.add(icon_button("⚙")).on_hover_text("Settings").clicked() {
                             self.show_settings = !self.show_settings;
+                            self.cli_cache = None;
                         }
                         let running = self.state.agents.iter().filter(|a| self.status(a.id).alive()).count();
                         let stopped: Vec<u64> =
@@ -70,10 +71,11 @@ impl App {
                                 .on_hover_text("Start every stopped agent")
                                 .clicked()
                         {
+                            let newly_started = stopped.len();
                             for id in stopped {
                                 self.actions.push(Action::Start(id));
                             }
-                            if running + 1 > 1 {
+                            if running + newly_started > 1 {
                                 self.view = View::Grid;
                             }
                         }
@@ -86,9 +88,10 @@ impl App {
         if self.state.settings.sidebar_hidden {
             return;
         }
-        egui::SidePanel::left("sidebar")
+        let saved_w = self.state.layout.sidebar_width.unwrap_or(184.0).clamp(150.0, 360.0);
+        let resp = egui::SidePanel::left("sidebar")
             .resizable(true)
-            .default_width(184.0)
+            .default_width(saved_w)
             .width_range(150.0..=360.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(4)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
@@ -161,6 +164,11 @@ impl App {
                     self.drag_reorder(ui, &rects);
                 });
             });
+        let cur_w = resp.response.rect.width().round();
+        if (150.0..=360.0).contains(&cur_w) && self.state.layout.sidebar_width != Some(cur_w) {
+            self.state.layout.sidebar_width = Some(cur_w);
+            self.dirty = true;
+        }
     }
 
     /// One-row sidebar card: icon, name, status, cost. Returns its rect, and

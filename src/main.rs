@@ -13,7 +13,7 @@ mod usage;
 #[cfg(test)]
 mod live_tests;
 
-use agent::{Agent, Permission, Provider, State, Usage};
+use agent::{Agent, Permission, Provider, SavedView, State, Usage, WindowLayout};
 use eframe::egui::{self, Align, Color32, CornerRadius, Key, Layout, Margin, RichText, Sense, Stroke, Vec2};
 use usage::ClaudeTracker;
 use std::collections::{HashMap, HashSet};
@@ -32,19 +32,31 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     term::scrub_parent_session_env();
+    let state = State::load();
+    let w = state.layout.width.unwrap_or(1040.0).clamp(720.0, 4096.0);
+    let h = state.layout.height.unwrap_or(620.0).clamp(440.0, 2160.0);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Kennel")
+        .with_icon(egui::IconData { rgba: icon::icon_rgba(64), width: 64, height: 64 })
+        .with_inner_size([w, h])
+        .with_min_inner_size([720.0, 440.0])
+        // Our toolbar is the title bar (drag, double-click, window buttons).
+        .with_decorations(false);
+    if let (Some(x), Some(y)) = (state.layout.x, state.layout.y) {
+        if x.is_finite() && y.is_finite() && (-3840.0..=7680.0).contains(&x) && (-2160.0..=4320.0).contains(&y) {
+            viewport = viewport.with_position([x, y]);
+        }
+    }
+    if state.layout.maximized {
+        viewport = viewport.with_maximized(true);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Kennel")
-            .with_icon(egui::IconData { rgba: icon::icon_rgba(64), width: 64, height: 64 })
-            .with_inner_size([1040.0, 620.0])
-            .with_min_inner_size([720.0, 440.0])
-            // Our toolbar is the title bar (drag, double-click, window buttons).
-            .with_decorations(false),
+        viewport,
         renderer: eframe::Renderer::Glow,
         vsync: true,
         ..Default::default()
     };
-    eframe::run_native("Kennel", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native("Kennel", options, Box::new(move |cc| Ok(Box::new(App::new(cc, state)))))
 }
 
 // ---------- runtime state ----------
@@ -55,8 +67,28 @@ enum View {
     Grid,
 }
 
+impl From<SavedView> for View {
+    fn from(v: SavedView) -> Self {
+        match v {
+            SavedView::Focus => View::Focus,
+            SavedView::Grid => View::Grid,
+        }
+    }
+}
+
+impl From<View> for SavedView {
+    fn from(v: View) -> Self {
+        match v {
+            View::Focus => SavedView::Focus,
+            View::Grid => SavedView::Grid,
+        }
+    }
+}
+
 struct Live {
     sess: TermSession,
+    /// Incremental scrollback search bar state for this terminal.
+    search: term_view::TermSearch,
     /// Screen shows a question / permission prompt (refreshed by `scan_prompts`).
     asking: bool,
     last_scan: Instant,
@@ -155,6 +187,8 @@ struct App {
     statuses: HashMap<u64, Status>,
     /// The Thai fallback font has been loaded.
     thai_font: bool,
+    /// Cached CLI resolution for the Settings window: (claude_input, opencode_input, claude_exe, opencode_exe).
+    cli_cache: Option<(String, String, Option<PathBuf>, Option<PathBuf>)>,
 }
 
 /// Length of the fade when switching views or agents.
@@ -165,19 +199,31 @@ fn term_id(agent_id: u64) -> egui::Id {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let state = State::load();
+    fn new(cc: &eframe::CreationContext<'_>, state: State) -> Self {
         let thai_font = state.agents.iter().any(|a| has_thai(&a.name));
         install_fonts(&cc.egui_ctx, thai_font);
         apply_style(&cc.egui_ctx);
+        // Reserve Ctrl+=/Ctrl+-/Ctrl+0 for terminal font size rather than whole-UI zoom.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let (bg_tx, bg_rx) = channel();
         let selected = state.agents.first().map(|a| a.id);
         let new_folder = state.settings.last_folder.clone();
+        let view = View::from(state.layout.view);
+        let grid_cols = if WindowLayout::valid_tracks(&state.layout.grid_cols) {
+            state.layout.grid_cols.clone()
+        } else {
+            Vec::new()
+        };
+        let grid_rows = if WindowLayout::valid_tracks(&state.layout.grid_rows) {
+            state.layout.grid_rows.clone()
+        } else {
+            Vec::new()
+        };
         App {
             state,
             live: HashMap::new(),
             selected,
-            view: View::Focus,
+            view,
             attention: HashSet::new(),
             editor: None,
             show_settings: false,
@@ -196,12 +242,13 @@ impl App {
             new_folder,
             toasts: Vec::new(),
             actions: Vec::new(),
-            grid_cols: Vec::new(),
-            grid_rows: Vec::new(),
-            view_key: (View::Focus, selected),
+            grid_cols,
+            grid_rows,
+            view_key: (view, selected),
             view_changed: Instant::now() - Duration::from_secs(1),
             statuses: HashMap::new(),
             thai_font,
+            cli_cache: None,
         }
     }
 
@@ -295,6 +342,7 @@ impl App {
             id,
             Live {
                 sess,
+                search: term_view::TermSearch::default(),
                 asking: false,
                 last_scan: Instant::now(),
                 interacted: false,
@@ -552,6 +600,56 @@ impl App {
             self.last_save = Instant::now();
         }
     }
+
+    /// Record window bounds, maximized state, active view, and grid splits for persistence.
+    fn track_window_layout(&mut self, ctx: &egui::Context) {
+        let (maximized, minimized, inner_rect, outer_rect) = ctx.input(|i| {
+            let vp = i.viewport();
+            (vp.maximized.unwrap_or(false), vp.minimized.unwrap_or(false), vp.inner_rect, vp.outer_rect)
+        });
+        let layout = &mut self.state.layout;
+        if layout.maximized != maximized {
+            layout.maximized = maximized;
+            self.dirty = true;
+        }
+        if !maximized && !minimized {
+            if let Some(r) = inner_rect {
+                let w = r.width().round();
+                let h = r.height().round();
+                if w >= 720.0 && h >= 440.0 {
+                    if layout.width != Some(w) || layout.height != Some(h) {
+                        layout.width = Some(w);
+                        layout.height = Some(h);
+                        self.dirty = true;
+                    }
+                }
+            }
+            if let Some(r) = outer_rect {
+                let x = r.min.x.round();
+                let y = r.min.y.round();
+                if x.is_finite() && y.is_finite() && (-3840.0..=7680.0).contains(&x) && (-2160.0..=4320.0).contains(&y) {
+                    if layout.x != Some(x) || layout.y != Some(y) {
+                        layout.x = Some(x);
+                        layout.y = Some(y);
+                        self.dirty = true;
+                    }
+                }
+            }
+        }
+        let saved_view = SavedView::from(self.view);
+        if layout.view != saved_view {
+            layout.view = saved_view;
+            self.dirty = true;
+        }
+        if WindowLayout::valid_tracks(&self.grid_cols) && layout.grid_cols != self.grid_cols {
+            layout.grid_cols = self.grid_cols.clone();
+            self.dirty = true;
+        }
+        if WindowLayout::valid_tracks(&self.grid_rows) && layout.grid_rows != self.grid_rows {
+            layout.grid_rows = self.grid_rows.clone();
+            self.dirty = true;
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -559,7 +657,7 @@ impl eframe::App for App {
         if !self.autostarted {
             self.autostarted = true;
             let ids: Vec<u64> = self.state.agents.iter().filter(|a| a.resume_on_launch).map(|a| a.id).collect();
-            if ids.len() > 1 {
+            if ids.len() > 1 && self.state.layout.width.is_none() {
                 self.view = View::Grid;
             }
             for id in ids {
@@ -578,6 +676,7 @@ impl eframe::App for App {
         self.toasts(ctx);
         window_edges(ctx);
         self.apply_actions(ctx);
+        self.track_window_layout(ctx);
         self.maybe_save(false);
         if let Some(d) = self.next_tick() {
             ctx.request_repaint_after(d);

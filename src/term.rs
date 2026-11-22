@@ -124,11 +124,23 @@ impl EventListener for Listener {
     }
 }
 
+/// A match found by `TermSession::search` in grid coordinates
+/// (`line` is negative for scrollback history, `0..screen_lines` for the live screen).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub line: i32,
+    pub col_start: usize,
+    pub col_end: usize,
+}
+
 pub struct TermSession {
     pub term: Arc<FairMutex<Term<Listener>>>,
     pub shared: Arc<Shared>,
     tx: EventLoopSender,
     pub pid: Option<u32>,
+    killed: AtomicBool,
+    #[cfg(windows)]
+    job: Mutex<Option<usize>>,
     size: Size,
     /// Last painted frame and what it depended on (see `PaintKey`).
     pub paint_cache: Option<(PaintKey, egui::Shape)>,
@@ -162,6 +174,8 @@ impl TermSession {
         let pty = tty::new(&opts, ws, 0)?;
         #[cfg(windows)]
         let pid = pty.child_watcher().pid().map(|p| p.get());
+        #[cfg(windows)]
+        let job = pid.and_then(attach_job_object);
         #[cfg(not(windows))]
         let pid = Some(pty.child().id());
 
@@ -186,7 +200,17 @@ impl TermSession {
         let tx = event_loop.channel();
         let _ = shared.writer.set(tx.clone());
         event_loop.spawn();
-        Ok(TermSession { term, shared, tx, pid, size, paint_cache: None })
+        Ok(TermSession {
+            term,
+            shared,
+            tx,
+            pid,
+            killed: AtomicBool::new(false),
+            #[cfg(windows)]
+            job: Mutex::new(job),
+            size,
+            paint_cache: None,
+        })
     }
 
     pub fn generation(&self) -> u64 {
@@ -238,6 +262,57 @@ impl TermSession {
         if t.grid().display_offset() != 0 {
             t.scroll_display(Scroll::Bottom);
         }
+    }
+
+    pub fn scroll_to_offset(&self, offset: usize) {
+        let mut t = self.term.lock();
+        let max = t.grid().history_size();
+        let target = offset.min(max) as i32;
+        let cur = t.grid().display_offset() as i32;
+        if target != cur {
+            t.scroll_display(Scroll::Delta(target - cur));
+        }
+    }
+
+    /// Scroll so that grid `line` sits near the middle of the viewport.
+    pub fn scroll_to_line(&self, line: i32) {
+        let mut t = self.term.lock();
+        let g = t.grid();
+        let rows = g.screen_lines() as i32;
+        let hist = g.history_size() as i32;
+        let cur = g.display_offset() as i32;
+        let vis_row = line + cur;
+        if vis_row >= 0 && vis_row < rows {
+            return;
+        }
+        let target = (rows / 2 - line).clamp(0, hist);
+        if target != cur {
+            t.scroll_display(Scroll::Delta(target - cur));
+        }
+    }
+
+    /// Case-insensitive substring search across scrollback history and visible screen.
+    pub fn search(&self, query: &str) -> Vec<SearchMatch> {
+        let q: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let t = self.term.lock();
+        let g = t.grid();
+        let hist = g.history_size() as i32;
+        let rows = g.screen_lines() as i32;
+        let cols = g.columns();
+        let mut out = Vec::new();
+        let mut line_chars: Vec<char> = Vec::with_capacity(cols);
+        for l in -hist..rows {
+            let row = &g[Line(l)];
+            line_chars.clear();
+            line_chars.extend((0..cols).map(|c| row[Column(c)].c));
+            for (c0, c1) in find_line_matches(&line_chars, &q) {
+                out.push(SearchMatch { line: l, col_start: c0, col_end: c1 });
+            }
+        }
+        out
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize, cell_w: f32, cell_h: f32) {
@@ -325,9 +400,17 @@ impl TermSession {
     }
 
     pub fn kill(&self) {
+        if self.killed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let already_exited = self.exited().is_some();
         let _ = self.tx.send(Msg::Shutdown);
-        // Only kill while the child is known alive, so a recycled PID is never hit.
+        #[cfg(windows)]
+        if let Some(handle) = self.job.lock().unwrap().take() {
+            close_job_object(handle, !already_exited);
+            return;
+        }
+        // Fallback when no job object was attached: kill asynchronously so the UI never stalls.
         if let (Some(pid), false) = (self.pid, already_exited) {
             kill_tree(pid);
         }
@@ -337,6 +420,141 @@ impl TermSession {
 impl Drop for TermSession {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+fn find_line_matches(line: &[char], query_lower: &[char]) -> Vec<(usize, usize)> {
+    if query_lower.is_empty() || line.is_empty() {
+        return Vec::new();
+    }
+    // Map each lowercased char back to its source column index.
+    let mut lowered: Vec<(char, usize)> = Vec::with_capacity(line.len());
+    for (col, &ch) in line.iter().enumerate() {
+        for lc in ch.to_lowercase() {
+            lowered.push((lc, col));
+        }
+    }
+    let qlen = query_lower.len();
+    if lowered.len() < qlen {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + qlen <= lowered.len() {
+        if lowered[i..i + qlen].iter().zip(query_lower).all(|((a, _), b)| a == b) {
+            let col_start = lowered[i].1;
+            let col_end = lowered[i + qlen - 1].1 + 1;
+            out.push((col_start, col_end));
+            i += qlen;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+#[cfg(windows)]
+fn attach_job_object(pid: u32) -> Option<usize> {
+    use std::ffi::c_void;
+
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const PROCESS_SET_QUOTA: u32 = 0x0100;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectBasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectExtendedLimitInformation {
+        basic_limit_information: JobObjectBasicLimitInformation,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(attrs: *const c_void, name: *const u16) -> *mut c_void;
+        fn SetInformationJobObject(job: *mut c_void, class: u32, info: *const c_void, len: u32) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut info = JobObjectExtendedLimitInformation::default();
+        info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            (&info as *const JobObjectExtendedLimitInformation).cast(),
+            std::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+        );
+        if ok == 0 {
+            CloseHandle(job);
+            return None;
+        }
+        let proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if proc.is_null() {
+            CloseHandle(job);
+            return None;
+        }
+        let assigned = AssignProcessToJobObject(job, proc);
+        CloseHandle(proc);
+        if assigned == 0 {
+            CloseHandle(job);
+            return None;
+        }
+        Some(job as usize)
+    }
+}
+
+#[cfg(windows)]
+fn close_job_object(handle: usize, terminate: bool) {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn TerminateJobObject(job: *mut c_void, exit_code: u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    let job = handle as *mut c_void;
+    unsafe {
+        if terminate {
+            TerminateJobObject(job, 1);
+        }
+        CloseHandle(job);
     }
 }
 
@@ -375,7 +593,7 @@ pub fn scrub_parent_session_env() {
     }
 }
 
-/// Kill a process and everything it started.
+/// Kill a process and everything it started (fallback when no Win32 Job Object is attached).
 pub fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
@@ -385,11 +603,11 @@ pub fn kill_tree(pid: u32) {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .creation_flags(0x0800_0000)
-            .status();
+            .spawn();
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).spawn();
     }
 }
 
@@ -452,5 +670,33 @@ mod activity_tests {
     #[test]
     fn repeated_output_in_one_slot_counts_once() {
         assert_eq!(slots(&[5, 5, 5, 6]).len(), 2);
+    }
+
+    #[test]
+    fn search_line_matches_case_insensitively() {
+        let line: Vec<char> = "Error: foo BAR Foo".chars().collect();
+        let q: Vec<char> = "foo".chars().collect();
+        assert_eq!(find_line_matches(&line, &q), vec![(7, 10), (15, 18)]);
+        assert!(find_line_matches(&line, &[]).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn job_object_terminates_child_on_close() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .expect("spawn child");
+        let job = attach_job_object(child.id());
+        assert!(job.is_some(), "Win32 Job Object attach failed");
+        close_job_object(job.unwrap(), true);
+        let status = child.wait().expect("wait child");
+        assert!(!status.success(), "child should be terminated when job closes");
     }
 }

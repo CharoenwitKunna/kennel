@@ -165,6 +165,11 @@ pub(crate) fn window_edges(ctx: &egui::Context) {
     if maximized {
         return;
     }
+    // Keep the top-right window controls (Minimize / Maximize / Close) unoccluded
+    // so clicking the top-right corner of Close never starts a resize instead.
+    if p.x >= screen.right() - 126.0 && p.y <= screen.top() + 32.0 {
+        return;
+    }
     const EDGE: f32 = 5.0;
     let (l, r) = (p.x - screen.left() < EDGE, screen.right() - p.x < EDGE);
     let (t, b) = (p.y - screen.top() < EDGE, screen.bottom() - p.y < EDGE);

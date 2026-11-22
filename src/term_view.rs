@@ -1,6 +1,6 @@
 //! egui widget that draws a `TermSession` and forwards keyboard/mouse input to it.
 
-use crate::term::{PaintKey, TermSession};
+use crate::term::{PaintKey, SearchMatch, TermSession};
 use crate::theme;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -9,8 +9,8 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
-use eframe::egui::{self, Align2, Color32, EventFilter, FontId, Key, Modifiers, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use std::path::Path;
+use eframe::egui::{self, Align2, Color32, EventFilter, FontId, Key, Margin, Modifiers, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use std::path::{Path, PathBuf};
 
 const PAD: f32 = 6.0;
 
@@ -20,9 +20,70 @@ pub struct TermViewOutput {
     pub typed: bool,
 }
 
+/// Incremental scrollback search state for one terminal pane.
+#[derive(Default)]
+pub struct TermSearch {
+    pub open: bool,
+    pub query: String,
+    pub focus_input: bool,
+    pub matches: Vec<SearchMatch>,
+    pub active: usize,
+    last_gen: u64,
+    last_query: String,
+}
+
+impl TermSearch {
+    pub fn open(&mut self) {
+        self.open = true;
+        self.focus_input = true;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.focus_input = false;
+    }
+
+    fn refresh(&mut self, sess: &TermSession) -> bool {
+        let gen = sess.generation();
+        if self.query == self.last_query && gen == self.last_gen {
+            return false;
+        }
+        let query_changed = self.query != self.last_query;
+        self.last_query = self.query.clone();
+        self.last_gen = gen;
+        self.matches = sess.search(&self.query);
+        if self.matches.is_empty() {
+            self.active = 0;
+        } else if query_changed {
+            // Jump to the latest (bottom-most) match first — closest to current output.
+            self.active = self.matches.len() - 1;
+        } else if self.active >= self.matches.len() {
+            self.active = self.matches.len() - 1;
+        }
+        query_changed
+    }
+
+    fn step(&mut self, sess: &TermSession, delta: isize) {
+        if self.matches.is_empty() {
+            return;
+        }
+        let len = self.matches.len() as isize;
+        self.active = (self.active as isize + delta).rem_euclid(len) as usize;
+        sess.scroll_to_line(self.matches[self.active].line);
+    }
+}
+
 /// Draw the terminal into the whole available rect and handle input when focused.
 /// `cwd` resolves relative file paths for Ctrl+click.
-pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: f32, cwd: &Path) -> TermViewOutput {
+pub fn show(
+    ui: &mut egui::Ui,
+    sess: &mut TermSession,
+    id: egui::Id,
+    font_size: f32,
+    cwd: &Path,
+    search: &mut TermSearch,
+    single_pane: bool,
+) -> TermViewOutput {
     let font = FontId::monospace(font_size);
     // Cell width = the real advance of a long run (text is drawn in runs, so a
     // single glyph's rounded width would drift and clip the right edge).
@@ -41,6 +102,43 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
     };
     let glyph_h = glyph_h.ceil();
     let rect = ui.available_rect_before_wrap();
+
+    // Reserve overlay zones before registering the main terminal click handler so
+    // clicks on the search bar, jump-to-bottom pill, or scrollbar don't steal/leak.
+    let (mode, display_offset, history_size) = {
+        let t = sess.term.lock();
+        (*t.mode(), t.grid().display_offset(), t.grid().history_size())
+    };
+    let sb_hit_rect = if history_size > 0 {
+        Rect::from_min_max(Pos2::new(rect.right() - 10.0, rect.top() + 4.0), Pos2::new(rect.right(), rect.bottom() - 4.0))
+    } else {
+        Rect::NOTHING
+    };
+    let search_bar_h = if search.open { 34.0 } else { 0.0 };
+    let search_bar_rect = if search.open {
+        let w = 290.0_f32.min((rect.width() - 24.0).max(120.0));
+        Rect::from_min_size(Pos2::new(rect.right() - w - 12.0, rect.top() + 6.0), Vec2::new(w, 28.0))
+    } else {
+        Rect::NOTHING
+    };
+    let pill_rect = if display_offset > 0 {
+        let label = format!("↑ {display_offset} lines");
+        let sz = ui.fonts(|f| f.layout_no_wrap(label, FontId::proportional(11.5), theme::TEXT).size());
+        let w = sz.x + 14.0;
+        let h = sz.y + 6.0;
+        let right = if history_size > 0 { rect.right() - 14.0 } else { rect.right() - 10.0 };
+        Rect::from_min_size(Pos2::new(right - w, rect.top() + 8.0 + search_bar_h), Vec2::new(w, h))
+    } else {
+        Rect::NOTHING
+    };
+
+    let pointer_pos = ui.input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
+    let over_overlay = pointer_pos.is_some_and(|p| {
+        (search.open && search_bar_rect.contains(p))
+            || (display_offset > 0 && pill_rect.contains(p))
+            || (history_size > 0 && sb_hit_rect.contains(p))
+    });
+
     let response = ui.interact(rect, id, Sense::click_and_drag());
     ui.allocate_rect(rect, Sense::hover());
 
@@ -52,7 +150,7 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
     let text_dy = ((ch - glyph_h) / 2.0).floor();
     sess.resize(cols, rows, cw, ch);
 
-    if response.clicked() || response.drag_started() || response.secondary_clicked() {
+    if !over_overlay && (response.clicked() || response.drag_started() || response.secondary_clicked()) {
         response.request_focus();
     }
     let focused = response.has_focus();
@@ -68,17 +166,13 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
     };
 
     // ---------- mouse ----------
-    let (mode, display_offset) = {
-        let t = sess.term.lock();
-        (*t.mode(), t.grid().display_offset())
-    };
     let mouse_mode = mode.intersects(TermMode::MOUSE_MODE) && mode.contains(TermMode::SGR_MOUSE);
     let shift_held = ui.input(|i| i.modifiers.shift);
 
     // ---------- Ctrl+click: open URLs and file paths ----------
     let ctrl_held = ui.input(|i| i.modifiers.ctrl);
     let mut link: Option<(usize, usize, usize)> = None; // (row, first col, last col)
-    if ctrl_held && response.hovered() {
+    if ctrl_held && response.hovered() && !over_overlay {
         if let Some(pos) = response.hover_pos() {
             let (point, _, col, row) = cell_at(pos, display_offset);
             if let Some((c0, c1, target)) = link_at(&row_chars(sess, point.line), col, cwd) {
@@ -119,46 +213,76 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
         }
     }
 
-    if mouse_mode && !shift_held && link.is_none() {
-        // Forward clicks/drags to the app (OpenCode's TUI uses the mouse).
-        let pressed = ui.input(|i| i.pointer.primary_pressed());
-        let released = ui.input(|i| i.pointer.primary_released());
-        if let Some(pos) = response.interact_pointer_pos().or(response.hover_pos()) {
-            let (_, _, c, r) = cell_at(pos, 0);
-            if pressed && response.hovered() {
-                sess.write(format!("\x1b[<0;{};{}M", c + 1, r + 1));
-            } else if released && focused {
-                sess.write(format!("\x1b[<0;{};{}m", c + 1, r + 1));
-            } else if response.dragged() && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
-                sess.write(format!("\x1b[<32;{};{}M", c + 1, r + 1));
+    if !over_overlay {
+        if mouse_mode && !shift_held && link.is_none() {
+            // Forward clicks/drags to the app (OpenCode's TUI uses the mouse).
+            let pressed = ui.input(|i| i.pointer.primary_pressed());
+            let released = ui.input(|i| i.pointer.primary_released());
+            if let Some(pos) = response.interact_pointer_pos().or(response.hover_pos()) {
+                let (_, _, c, r) = cell_at(pos, 0);
+                if pressed && response.hovered() {
+                    sess.write(format!("\x1b[<0;{};{}M", c + 1, r + 1));
+                } else if released && focused {
+                    sess.write(format!("\x1b[<0;{};{}m", c + 1, r + 1));
+                } else if response.dragged() && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+                    sess.write(format!("\x1b[<32;{};{}M", c + 1, r + 1));
+                }
+            }
+        } else {
+            // Local text selection.
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (point, side, _, _) = cell_at(pos, display_offset);
+                let mut t = sess.term.lock();
+                if response.double_clicked() {
+                    t.selection = Some(Selection::new(SelectionType::Semantic, point, side));
+                } else if response.drag_started() {
+                    t.selection = Some(Selection::new(SelectionType::Simple, point, side));
+                } else if response.dragged() {
+                    if let Some(sel) = t.selection.as_mut() {
+                        sel.update(point, side);
+                    }
+                } else if response.clicked() {
+                    t.selection = None;
+                }
             }
         }
-    } else {
-        // Local text selection.
-        if let Some(pos) = response.interact_pointer_pos() {
-            let (point, side, _, _) = cell_at(pos, display_offset);
-            let mut t = sess.term.lock();
-            if response.double_clicked() {
-                t.selection = Some(Selection::new(SelectionType::Semantic, point, side));
-            } else if response.drag_started() {
-                t.selection = Some(Selection::new(SelectionType::Simple, point, side));
-            } else if response.dragged() {
-                if let Some(sel) = t.selection.as_mut() {
-                    sel.update(point, side);
+        if response.secondary_clicked() {
+            let text = sess.term.lock().selection_to_string();
+            match text {
+                Some(text) if !text.is_empty() => {
+                    ui.ctx().copy_text(text);
+                    sess.term.lock().selection = None;
                 }
-            } else if response.clicked() {
-                t.selection = None;
+                _ => {
+                    if let Some(clip) = read_clipboard_text() {
+                        if !clip.is_empty() {
+                            sess.paste(&clip);
+                            sess.scroll_to_bottom();
+                            typed = true;
+                        }
+                    }
+                }
             }
         }
     }
-    if response.secondary_clicked() {
-        let text = sess.term.lock().selection_to_string();
-        match text {
-            Some(text) if !text.is_empty() => {
-                ui.ctx().copy_text(text);
-                sess.term.lock().selection = None;
-            }
-            _ => {}
+
+    // ---------- drag-and-drop files ----------
+    let (hovered_files, dropped_paths) = ui.input(|i| {
+        let hovered = !i.raw.hovered_files.is_empty();
+        let dropped: Vec<PathBuf> = i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect();
+        (hovered, dropped)
+    });
+    let drop_target = ui
+        .input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()))
+        .is_some_and(|p| rect.contains(p))
+        || single_pane;
+    if !dropped_paths.is_empty() && drop_target {
+        let formatted = format_dropped_paths(&dropped_paths);
+        if !formatted.is_empty() {
+            sess.paste(&formatted);
+            sess.scroll_to_bottom();
+            response.request_focus();
+            typed = true;
         }
     }
 
@@ -173,6 +297,7 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
         let events = ui.input(|i| i.events.clone());
         let mods = ui.input(|i| i.modifiers);
         let app_cursor = mode.contains(TermMode::APP_CURSOR);
+        let alt_screen = mode.contains(TermMode::ALT_SCREEN);
         for ev in events {
             match ev {
                 egui::Event::Text(t) => {
@@ -208,6 +333,20 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
                     typed = true;
                 }
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    // Shift+PageUp/PageDown/Home/End scroll the viewport directly.
+                    if !alt_screen && modifiers.shift && !modifiers.ctrl && !modifiers.alt {
+                        let scroll = match key {
+                            Key::PageUp => Some(Scroll::PageUp),
+                            Key::PageDown => Some(Scroll::PageDown),
+                            Key::Home => Some(Scroll::Top),
+                            Key::End => Some(Scroll::Bottom),
+                            _ => None,
+                        };
+                        if let Some(s) = scroll {
+                            sess.term.lock().scroll_display(s);
+                            continue;
+                        }
+                    }
                     if let Some(bytes) = key_bytes(key, modifiers, app_cursor) {
                         sess.write(bytes);
                         typed = true;
@@ -222,18 +361,21 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
         }
     }
 
-    // Reuse last frame's shapes when nothing they depend on has changed.
-    let key = {
+    // ---------- paint cached terminal frame ----------
+    let (display_offset, history_size, key) = {
         let t = sess.term.lock();
-        PaintKey {
+        let d = t.grid().display_offset();
+        let h = t.grid().history_size();
+        let key = PaintKey {
             generation: sess.generation(),
             rect,
             cell: (cw, ch),
             font_size,
             focused,
-            display_offset: t.grid().display_offset(),
+            display_offset: d,
             selection: t.selection.as_ref().and_then(|s| s.to_range(&*t)),
-        }
+        };
+        (d, h, key)
     };
     let painter = ui.painter_at(rect);
     match &sess.paint_cache {
@@ -246,13 +388,233 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
             sess.paint_cache = Some((key, shape));
         }
     }
+
+    // ---------- search highlights overlay ----------
+    if search.open {
+        let jumped = search.refresh(sess);
+        if jumped {
+            if let Some(m) = search.matches.get(search.active) {
+                sess.scroll_to_line(m.line);
+            }
+        }
+        let cur_offset = sess.term.lock().grid().display_offset() as i32;
+        for (idx, m) in search.matches.iter().enumerate() {
+            let vis_row = m.line + cur_offset;
+            if vis_row < 0 || vis_row >= rows as i32 {
+                continue;
+            }
+            let r = Rect::from_min_size(
+                Pos2::new(inner.left() + m.col_start as f32 * cw, inner.top() + vis_row as f32 * ch),
+                Vec2::new((m.col_end - m.col_start) as f32 * cw, ch),
+            );
+            if idx == search.active {
+                painter.rect_filled(r, 2.0, theme::AMBER.gamma_multiply(0.45));
+                painter.rect_stroke(r, 2.0, Stroke::new(1.0_f32, theme::AMBER), egui::StrokeKind::Inside);
+            } else {
+                painter.rect_filled(r, 2.0, theme::AMBER.gamma_multiply(0.22));
+            }
+        }
+    }
+
+    // ---------- Ctrl+hover link underline ----------
     if let Some((row, c0, c1)) = link {
         let y = inner.top() + (row as f32 + 1.0) * ch - 1.0;
         let x0 = inner.left() + c0 as f32 * cw;
         let x1 = inner.left() + (c1 + 1) as f32 * cw;
-        ui.painter_at(rect).line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(1.5_f32, theme::ACCENT));
+        painter.line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(1.5_f32, theme::ACCENT));
     }
+
+    // ---------- slim hover scrollbar ----------
+    if history_size > 0 {
+        let sb_resp = ui.interact(sb_hit_rect, id.with("scrollbar"), Sense::click_and_drag());
+        let near_edge = pointer_pos.is_some_and(|p| rect.contains(p) && rect.right() - p.x < 28.0);
+        let active = sb_resp.hovered() || sb_resp.dragged();
+        if display_offset > 0 || near_edge || active {
+            let track_h = sb_hit_rect.height().max(1.0);
+            let total = (rows + history_size) as f32;
+            let thumb_h = ((rows as f32 / total) * track_h).clamp(20.0, track_h);
+            let travel = (track_h - thumb_h).max(1.0);
+            if sb_resp.dragged() || sb_resp.clicked() {
+                if let Some(p) = sb_resp.interact_pointer_pos() {
+                    let frac = ((p.y - sb_hit_rect.top() - thumb_h * 0.5) / travel).clamp(0.0, 1.0);
+                    let target = ((1.0 - frac) * history_size as f32).round() as usize;
+                    sess.scroll_to_offset(target);
+                }
+            }
+            let cur_off = sess.term.lock().grid().display_offset();
+            let frac = 1.0 - (cur_off as f32 / history_size as f32);
+            let thumb_top = sb_hit_rect.top() + frac * travel;
+            let bar_w = if active { 6.0 } else { 3.0 };
+            let thumb = Rect::from_min_size(
+                Pos2::new(rect.right() - bar_w - 2.0, thumb_top),
+                Vec2::new(bar_w, thumb_h),
+            );
+            let alpha = if active { 0.75 } else { 0.4 };
+            painter.rect_filled(thumb, bar_w * 0.5, theme::MUTED.gamma_multiply(alpha));
+            if active {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+        }
+    }
+
+    // ---------- clickable "↑ N lines" jump-to-bottom pill ----------
+    let live_offset = sess.term.lock().grid().display_offset();
+    if live_offset > 0 && pill_rect.is_positive() {
+        let pill_resp = ui
+            .interact(pill_rect, id.with("scroll_pill"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Jump to bottom (Shift+End)");
+        let fill = if pill_resp.hovered() { theme::HOVER } else { theme::RAISED };
+        painter.rect_filled(pill_rect, 6.0, fill);
+        painter.rect_stroke(pill_rect, 6.0, Stroke::new(1.0_f32, theme::BORDER), egui::StrokeKind::Inside);
+        let label = format!("↑ {live_offset} lines");
+        let galley = ui.fonts(|f| f.layout_no_wrap(label, FontId::proportional(11.5), theme::TEXT));
+        painter.galley(pill_rect.center() - galley.size() / 2.0, galley, theme::TEXT);
+        if pill_resp.clicked() {
+            sess.scroll_to_bottom();
+        }
+    }
+
+    // ---------- floating search bar (Ctrl+Shift+F) ----------
+    if search.open && search_bar_rect.is_positive() {
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(search_bar_rect));
+        egui::Frame::new()
+            .fill(theme::RAISED)
+            .stroke(Stroke::new(1.0_f32, theme::BORDER))
+            .corner_radius(6)
+            .inner_margin(Margin::symmetric(6, 3))
+            .show(&mut child, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let input_w = (ui.available_width() - 96.0).max(60.0);
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut search.query)
+                            .hint_text("Find…")
+                            .desired_width(input_w)
+                            .margin(Margin::symmetric(4, 1)),
+                    );
+                    if std::mem::take(&mut search.focus_input) {
+                        resp.request_focus();
+                    }
+                    if resp.has_focus() {
+                        if ui.input(|i| i.key_pressed(Key::Escape)) {
+                            search.close();
+                            ui.memory_mut(|m| m.request_focus(id));
+                        } else if ui.input(|i| i.key_pressed(Key::Enter)) {
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            search.refresh(sess);
+                            search.step(sess, if shift { -1 } else { 1 });
+                            resp.request_focus();
+                        }
+                    }
+                    let count_text = if search.query.is_empty() {
+                        String::new()
+                    } else if search.matches.is_empty() {
+                        "0/0".into()
+                    } else {
+                        format!("{}/{}", search.active + 1, search.matches.len())
+                    };
+                    let count_col = if !search.query.is_empty() && search.matches.is_empty() {
+                        theme::RED
+                    } else {
+                        theme::MUTED
+                    };
+                    ui.label(egui::RichText::new(count_text).small().color(count_col));
+                    if ui.small_button("↑").on_hover_text("Previous (Shift+Enter)").clicked() {
+                        search.refresh(sess);
+                        search.step(sess, -1);
+                    }
+                    if ui.small_button("↓").on_hover_text("Next (Enter)").clicked() {
+                        search.refresh(sess);
+                        search.step(sess, 1);
+                    }
+                    if ui.small_button("×").on_hover_text("Close (Esc)").clicked() {
+                        search.close();
+                        ui.memory_mut(|m| m.request_focus(id));
+                    }
+                });
+            });
+    }
+
+    // ---------- file drag-over indicator ----------
+    if hovered_files && drop_target {
+        painter.rect_filled(rect, 4.0, theme::ACCENT.gamma_multiply(0.10));
+        painter.rect_stroke(rect.shrink(1.0), 4.0, Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+        let galley = ui.fonts(|f| f.layout_no_wrap("Drop to paste path".into(), theme::bold(13.0), theme::TEXT));
+        let badge = Rect::from_center_size(rect.center(), galley.size() + Vec2::new(20.0, 12.0));
+        painter.rect_filled(badge, 8.0, theme::RAISED);
+        painter.rect_stroke(badge, 8.0, Stroke::new(1.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+        painter.galley(badge.center() - galley.size() / 2.0, galley, theme::TEXT);
+    }
+
     TermViewOutput { response, typed }
+}
+
+/// Format dropped filesystem paths for pasting into a shell/TUI prompt.
+/// Paths containing whitespace or common shell metacharacters are double-quoted.
+pub fn format_dropped_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| {
+            let s = p.to_string_lossy();
+            if s.chars().any(|c| c.is_whitespace() || matches!(c, '&' | '(' | ')' | '^' | ';' | '\'' | '"')) {
+                format!("\"{}\"", s.replace('"', "\\\""))
+            } else {
+                s.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Read UTF-16 text from the Windows clipboard without extra crate dependencies.
+#[cfg(windows)]
+fn read_clipboard_text() -> Option<String> {
+    use std::ffi::c_void;
+    const CF_UNICODETEXT: u32 = 13;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn OpenClipboard(hwnd: *mut c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(format: u32) -> *mut c_void;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalLock(hmem: *mut c_void) -> *const u16;
+        fn GlobalUnlock(hmem: *mut c_void) -> i32;
+    }
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let result = (|| {
+            let handle = GetClipboardData(CF_UNICODETEXT);
+            if handle.is_null() {
+                return None;
+            }
+            let ptr = GlobalLock(handle);
+            if ptr.is_null() {
+                return None;
+            }
+            let mut len = 0usize;
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(ptr, len);
+            let s = String::from_utf16_lossy(slice);
+            GlobalUnlock(handle);
+            Some(s)
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
+#[cfg(not(windows))]
+fn read_clipboard_text() -> Option<String> {
+    None
 }
 
 /// Characters of one grid line (viewport-relative `Line`, as `cell_at` returns).
@@ -356,9 +718,6 @@ impl Rec<'_> {
         let r = align.anchor_size(pos, galley.size());
         self.push(Shape::galley(r.min, galley, color));
     }
-    fn galley(&self, pos: Pos2, galley: std::sync::Arc<egui::Galley>, color: Color32) {
-        self.push(Shape::galley(pos, galley, color));
-    }
     fn rect_filled(&self, rect: Rect, radius: f32, color: Color32) {
         self.push(Shape::rect_filled(rect, radius, color));
     }
@@ -367,6 +726,9 @@ impl Rec<'_> {
     }
     fn line_segment(&self, pts: [Pos2; 2], stroke: Stroke) {
         self.push(Shape::line_segment(pts, stroke));
+    }
+    fn polyline(&self, pts: Vec<Pos2>, stroke: Stroke) {
+        self.push(Shape::line(pts, stroke));
     }
 }
 
@@ -385,10 +747,12 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
     let cursor = content.cursor;
     let show_cursor = content.mode.contains(TermMode::SHOW_CURSOR) && cursor.shape != CursorShape::Hidden;
 
-    // Text run of same-styled ASCII cells.
+    // Text run of same-styled single-width cells (ASCII or batched non-ASCII).
     struct Run {
         row: i32,
         col: usize,
+        cells: usize,
+        ascii: bool,
         fg: Color32,
         bold: bool,
         underline: bool,
@@ -403,26 +767,38 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
     let mut bg_run: Option<(i32, usize, usize, Color32)> = None;
 
     let pos_of = |row: i32, col: usize| Pos2::new(inner.left() + col as f32 * cw, inner.top() + row as f32 * ch);
+    let draw_decor = |p: Pos2, w: f32, underline: bool, strike: bool, fg: Color32| {
+        if underline {
+            let y = p.y + ch - 1.5;
+            painter.line_segment([Pos2::new(p.x, y), Pos2::new(p.x + w, y)], Stroke::new(1.0_f32, fg));
+        }
+        if strike {
+            let y = p.y + ch * 0.55;
+            painter.line_segment([Pos2::new(p.x, y), Pos2::new(p.x + w, y)], Stroke::new(1.0_f32, fg));
+        }
+    };
     let flush = |run: &mut Option<Run>| {
         if let Some(r) = run.take() {
             if r.text.trim_end().is_empty() && !r.underline && !r.strike {
                 return;
             }
             let p = pos_of(r.row, r.col);
-            let tp = p + Vec2::new(0.0, text_dy);
-            painter.text(tp, Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
-            if r.bold {
-                painter.text(tp + Vec2::new(BOLD_SHIFT, 0.0), Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
+            let w = r.cells as f32 * cw;
+            if !r.ascii && r.cells == 1 {
+                // Single isolated non-ASCII symbol (e.g. ●, ❯, ✻): center in cell.
+                let center = Pos2::new(p.x + cw / 2.0, p.y + text_dy);
+                if r.bold {
+                    painter.text(center + Vec2::new(BOLD_SHIFT, 0.0), Align2::CENTER_TOP, &r.text, font.clone(), r.fg);
+                }
+                painter.text(center, Align2::CENTER_TOP, &r.text, font.clone(), r.fg);
+            } else {
+                let tp = p + Vec2::new(0.0, text_dy);
+                painter.text(tp, Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
+                if r.bold {
+                    painter.text(tp + Vec2::new(BOLD_SHIFT, 0.0), Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
+                }
             }
-            let w = r.text.chars().count() as f32 * cw;
-            if r.underline {
-                let y = p.y + ch - 1.5;
-                painter.line_segment([Pos2::new(p.x, y), Pos2::new(p.x + w, y)], Stroke::new(1.0_f32, r.fg));
-            }
-            if r.strike {
-                let y = p.y + ch * 0.55;
-                painter.line_segment([Pos2::new(p.x, y), Pos2::new(p.x + w, y)], Stroke::new(1.0_f32, r.fg));
-            }
+            draw_decor(p, w, r.underline, r.strike, r.fg);
         }
     };
     let flush_bg = |bg: &mut Option<(i32, usize, usize, Color32)>| {
@@ -447,7 +823,7 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
         let width = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
 
         let bold = cell.flags.contains(Flags::BOLD);
-        let mut fg = resolve(cell.fg, colors, false);
+        let mut fg = resolve(cell.fg, colors, bold);
         let mut bg = resolve(cell.bg, colors, false);
         if cell.flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
@@ -486,34 +862,73 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
         if c.is_ascii() && zw.is_none() {
             match &mut run {
                 Some(r)
-                    if r.row == row
-                        && r.col + r.text.len() == col
+                    if r.ascii
+                        && r.row == row
+                        && r.col + r.cells == col
                         && r.fg == fg
                         && r.bold == bold
                         && r.underline == underline
                         && r.strike == strike =>
                 {
-                    r.text.push(c)
+                    r.text.push(c);
+                    r.cells += 1;
                 }
                 _ => {
                     flush(&mut run);
-                    run = Some(Run { row, col, fg, bold, underline, strike, text: c.to_string() });
+                    run = Some(Run { row, col, cells: 1, ascii: true, fg, bold, underline, strike, text: c.to_string() });
                 }
             }
+        } else if zw.is_none() && ('\u{2500}'..='\u{257F}').contains(&c) {
+            // Box-drawing characters drawn as crisp pixel-aligned vector primitives.
+            flush(&mut run);
+            let cell_rect = Rect::from_min_size(pos_of(row, col), Vec2::new(cw, ch));
+            draw_box_drawing(&painter, c, cell_rect, fg);
         } else if let Some(rects) = zw.is_none().then(|| block_rects(c)).flatten() {
             // Block elements are drawn as solid shapes so they tile without gaps.
             flush(&mut run);
-            let cell = Rect::from_min_size(pos_of(row, col), Vec2::new(cw, ch));
+            let cell_rect = Rect::from_min_size(pos_of(row, col), Vec2::new(cw, ch));
             let (rects, alpha) = rects;
             let color = if alpha < 1.0 { fg.gamma_multiply(alpha) } else { fg };
             for (x0, y0, x1, y1) in rects {
                 let r = Rect::from_min_max(
-                    Pos2::new(cell.left() + x0 * cw, cell.top() + y0 * ch),
-                    Pos2::new(cell.left() + x1 * cw, cell.top() + y1 * ch),
+                    Pos2::new(cell_rect.left() + x0 * cw, cell_rect.top() + y0 * ch),
+                    Pos2::new(cell_rect.left() + x1 * cw, cell_rect.top() + y1 * ch),
                 );
                 painter.rect_filled(r.expand(0.25), 0.0, color);
             }
+        } else if width == 1 {
+            // Batch consecutive single-width non-ASCII cells (Thai, accents, etc.)
+            // into one text run so combining glyphs shape cleanly and allocations drop.
+            if theme::is_thai(c) {
+                theme::WANT_THAI.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            match &mut run {
+                Some(r)
+                    if !r.ascii
+                        && r.row == row
+                        && r.col + r.cells == col
+                        && r.fg == fg
+                        && r.bold == bold
+                        && r.underline == underline
+                        && r.strike == strike =>
+                {
+                    r.text.push(c);
+                    if let Some(z) = zw {
+                        r.text.extend(z.iter());
+                    }
+                    r.cells += 1;
+                }
+                _ => {
+                    flush(&mut run);
+                    let mut text = c.to_string();
+                    if let Some(z) = zw {
+                        text.extend(z.iter());
+                    }
+                    run = Some(Run { row, col, cells: 1, ascii: false, fg, bold, underline, strike, text });
+                }
+            }
         } else {
+            // Wide character (CJK / emoji): center in its 2-cell slot.
             flush(&mut run);
             if theme::is_thai(c) {
                 theme::WANT_THAI.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -523,12 +938,12 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
                 s.extend(z.iter());
             }
             let p = pos_of(row, col);
-            // Center the glyph in its cell(s); fallback fonts may be wider/narrower.
             let center = Pos2::new(p.x + width as f32 * cw / 2.0, p.y + text_dy);
             if bold {
                 painter.text(center + Vec2::new(BOLD_SHIFT, 0.0), Align2::CENTER_TOP, &s, font.clone(), fg);
             }
             painter.text(center, Align2::CENTER_TOP, s, font.clone(), fg);
+            draw_decor(p, width as f32 * cw, underline, strike, fg);
         }
 
         if is_cursor && !(cursor.shape == CursorShape::Block && focused) {
@@ -551,18 +966,379 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
     flush_bg(&mut bg_run);
     flush(&mut run);
 
-    if content.display_offset > 0 {
-        let label = format!("↑ {} lines", content.display_offset);
-        let p = Pos2::new(rect.right() - 10.0, rect.top() + 8.0);
-        let galley = painter.layout_no_wrap(label, FontId::proportional(11.5), theme::TEXT);
-        let r = Rect::from_min_size(Pos2::new(p.x - galley.size().x - 12.0, p.y), galley.size() + Vec2::new(12.0, 6.0));
-        painter.rect_filled(r, 6.0, theme::RAISED);
-        painter.galley(r.min + Vec2::new(6.0, 3.0), galley, theme::TEXT);
-    }
     drop(t);
     let mut all = bg_shapes.into_inner();
     all.append(&mut painter.shapes.into_inner());
     Shape::Vec(all)
+}
+
+// ---------- Vector box-drawing (U+2500..=U+257F) ----------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arm {
+    None,
+    Light,
+    Heavy,
+    Double,
+}
+
+/// Cardinal arms (left, right, up, down) for standard Unicode box-drawing characters.
+fn box_arms(c: char) -> Option<(Arm, Arm, Arm, Arm)> {
+    use Arm::{Double as D, Heavy as H, Light as L, None as N};
+    let arms = match c {
+        '\u{2500}' => (L, L, N, N), // ─
+        '\u{2501}' => (H, H, N, N), // ━
+        '\u{2502}' => (N, N, L, L), // │
+        '\u{2503}' => (N, N, H, H), // ┃
+        '\u{250C}' => (N, L, N, L), // ┌
+        '\u{250D}' => (N, H, N, L), // ┍
+        '\u{250E}' => (N, L, N, H), // ┎
+        '\u{250F}' => (N, H, N, H), // ┏
+        '\u{2510}' => (L, N, N, L), // ┐
+        '\u{2511}' => (H, N, N, L), // ┑
+        '\u{2512}' => (L, N, N, H), // ┒
+        '\u{2513}' => (H, N, N, H), // ┓
+        '\u{2514}' => (N, L, L, N), // └
+        '\u{2515}' => (N, H, L, N), // ┕
+        '\u{2516}' => (N, L, H, N), // ┖
+        '\u{2517}' => (N, H, H, N), // ┗
+        '\u{2518}' => (L, N, L, N), // ┘
+        '\u{2519}' => (H, N, L, N), // ┙
+        '\u{251A}' => (L, N, H, N), // ┚
+        '\u{251B}' => (H, N, H, N), // ┛
+        '\u{251C}' => (N, L, L, L), // ├
+        '\u{251D}' => (N, H, L, L), // ┝
+        '\u{251E}' => (N, L, H, L), // ┞
+        '\u{251F}' => (N, L, L, H), // ┟
+        '\u{2520}' => (N, L, H, H), // ┠
+        '\u{2521}' => (N, H, H, L), // ┡
+        '\u{2522}' => (N, H, L, H), // ┢
+        '\u{2523}' => (N, H, H, H), // ┣
+        '\u{2524}' => (L, N, L, L), // ┤
+        '\u{2525}' => (H, N, L, L), // ┥
+        '\u{2526}' => (L, N, H, L), // ┦
+        '\u{2527}' => (L, N, L, H), // ┧
+        '\u{2528}' => (L, N, H, H), // ┨
+        '\u{2529}' => (H, N, H, L), // ┩
+        '\u{252A}' => (H, N, L, H), // ┪
+        '\u{252B}' => (H, N, H, H), // ┫
+        '\u{252C}' => (L, L, N, L), // ┬
+        '\u{252D}' => (H, L, N, L), // ┭
+        '\u{252E}' => (L, H, N, L), // ┮
+        '\u{252F}' => (H, H, N, L), // ┯
+        '\u{2530}' => (L, L, N, H), // ┰
+        '\u{2531}' => (H, L, N, H), // ┱
+        '\u{2532}' => (L, H, N, H), // ┲
+        '\u{2533}' => (H, H, N, H), // ┳
+        '\u{2534}' => (L, L, L, N), // ┴
+        '\u{2535}' => (H, L, L, N), // ┵
+        '\u{2536}' => (L, H, L, N), // ┶
+        '\u{2537}' => (H, H, L, N), // ┷
+        '\u{2538}' => (L, L, H, N), // ┸
+        '\u{2539}' => (H, L, H, N), // ┹
+        '\u{253A}' => (L, H, H, N), // ┺
+        '\u{253B}' => (H, H, H, N), // ┻
+        '\u{253C}' => (L, L, L, L), // ┼
+        '\u{253D}' => (H, L, L, L), // ┽
+        '\u{253E}' => (L, H, L, L), // ┾
+        '\u{253F}' => (H, H, L, L), // ┿
+        '\u{2540}' => (L, L, H, L), // ╀
+        '\u{2541}' => (L, L, L, H), // ╁
+        '\u{2542}' => (L, L, H, H), // ╂
+        '\u{2543}' => (H, L, H, L), // ╃
+        '\u{2544}' => (L, H, H, L), // ╄
+        '\u{2545}' => (H, L, L, H), // ╅
+        '\u{2546}' => (L, H, L, H), // ╆
+        '\u{2547}' => (H, H, H, L), // ╇
+        '\u{2548}' => (H, H, L, H), // ╈
+        '\u{2549}' => (H, L, H, H), // ╉
+        '\u{254A}' => (L, H, H, H), // ╊
+        '\u{254B}' => (H, H, H, H), // ╋
+        '\u{2550}' => (D, D, N, N), // ═
+        '\u{2551}' => (N, N, D, D), // ║
+        '\u{2552}' => (N, D, N, L), // ╒
+        '\u{2553}' => (N, L, N, D), // ╓
+        '\u{2554}' => (N, D, N, D), // ╔
+        '\u{2555}' => (D, N, N, L), // ╕
+        '\u{2556}' => (L, N, N, D), // ╖
+        '\u{2557}' => (D, N, N, D), // ╗
+        '\u{2558}' => (N, D, L, N), // ╘
+        '\u{2559}' => (N, L, D, N), // ╙
+        '\u{255A}' => (N, D, D, N), // ╚
+        '\u{255B}' => (D, N, L, N), // ╛
+        '\u{255C}' => (L, N, D, N), // ╜
+        '\u{255D}' => (D, N, D, N), // ╝
+        '\u{255E}' => (N, D, L, L), // ╞
+        '\u{255F}' => (N, L, D, D), // ╟
+        '\u{2560}' => (N, D, D, D), // ╠
+        '\u{2561}' => (D, N, L, L), // ╡
+        '\u{2562}' => (L, N, D, D), // ╢
+        '\u{2563}' => (D, N, D, D), // ╣
+        '\u{2564}' => (D, D, N, L), // ╤
+        '\u{2565}' => (L, L, N, D), // ╥
+        '\u{2566}' => (D, D, N, D), // ╦
+        '\u{2567}' => (D, D, L, N), // ╧
+        '\u{2568}' => (L, L, D, N), // ╨
+        '\u{2569}' => (D, D, D, N), // ╩
+        '\u{256A}' => (D, D, L, L), // ╪
+        '\u{256B}' => (L, L, D, D), // ╫
+        '\u{256C}' => (D, D, D, D), // ╬
+        '\u{2574}' => (L, N, N, N), // ╴
+        '\u{2575}' => (N, N, L, N), // ╵
+        '\u{2576}' => (N, L, N, N), // ╶
+        '\u{2577}' => (N, N, N, L), // ╷
+        '\u{2578}' => (H, N, N, N), // ╸
+        '\u{2579}' => (N, N, H, N), // ╹
+        '\u{257A}' => (N, H, N, N), // ╺
+        '\u{257B}' => (N, N, N, H), // ╻
+        '\u{257C}' => (L, H, N, N), // ╼
+        '\u{257D}' => (N, N, L, H), // ╽
+        '\u{257E}' => (H, L, N, N), // ╾
+        '\u{257F}' => (N, N, H, L), // ╿
+        _ => return None,
+    };
+    Some(arms)
+}
+
+/// Draw any Unicode box-drawing glyph (`U+2500..=U+257F`) as crisp vector shapes
+/// that join across adjacent cells without sub-pixel gaps.
+fn draw_box_drawing(painter: &Rec<'_>, c: char, cell: Rect, fg: Color32) {
+    let cw = cell.width();
+    let ch = cell.height();
+    let cx = cell.center().x;
+    let cy = cell.center().y;
+    let lw = (cw * 0.13).clamp(1.0, 2.0).round();
+    let hw = (lw * 2.0).min(cw * 0.35).round().max(lw + 1.0);
+    let gap = (cw * 0.24).clamp(2.0, 4.0).round();
+    // Slight bleed past cell borders so neighboring box cells join seamlessly.
+    let pad = 0.25;
+    let x0 = cell.left() - pad;
+    let x1 = cell.right() + pad;
+    let y0 = cell.top() - pad;
+    let y1 = cell.bottom() + pad;
+
+    // 1. Dashed lines (2-, 3-, 4-dash light & heavy).
+    let dash = match c {
+        '\u{2504}' => Some((true, 3, lw)),  // ┄
+        '\u{2505}' => Some((true, 3, hw)),  // ┅
+        '\u{2506}' => Some((false, 3, lw)), // ┆
+        '\u{2507}' => Some((false, 3, hw)), // ┇
+        '\u{2508}' => Some((true, 4, lw)),  // ┈
+        '\u{2509}' => Some((true, 4, hw)),  // ┉
+        '\u{250A}' => Some((false, 4, lw)), // ┊
+        '\u{250B}' => Some((false, 4, hw)), // ┋
+        '\u{254C}' => Some((true, 2, lw)),  // ╌
+        '\u{254D}' => Some((true, 2, hw)),  // ╍
+        '\u{254E}' => Some((false, 2, lw)), // ╎
+        '\u{254F}' => Some((false, 2, hw)), // ╏
+        _ => None,
+    };
+    if let Some((horiz, count, thick)) = dash {
+        let half = thick * 0.5;
+        let step = (if horiz { cw } else { ch }) / count as f32;
+        let len = (step * 0.62).max(1.0);
+        for i in 0..count {
+            let start = i as f32 * step + (step - len) * 0.5;
+            let r = if horiz {
+                Rect::from_min_max(Pos2::new(cell.left() + start, cy - half), Pos2::new(cell.left() + start + len, cy + half))
+            } else {
+                Rect::from_min_max(Pos2::new(cx - half, cell.top() + start), Pos2::new(cx + half, cell.top() + start + len))
+            };
+            painter.rect_filled(r, 0.0, fg);
+        }
+        return;
+    }
+
+    // 2. Rounded corners (╭ ╮ ╯ ╰).
+    if matches!(c, '\u{256D}'..='\u{2570}') {
+        let rad = (cw * 0.5).min(ch * 0.5);
+        let stroke = Stroke::new(lw, fg);
+        // Quarter-circle arc + straight extensions to the cell edges.
+        let (arc_center, a0, a1, p_start, p_end) = match c {
+            '\u{256D}' => (
+                // ╭ right + down
+                Pos2::new(cx + rad, cy + rad),
+                std::f32::consts::PI,
+                1.5 * std::f32::consts::PI,
+                Pos2::new(cx, y1),
+                Pos2::new(x1, cy),
+            ),
+            '\u{256E}' => (
+                // ╮ left + down
+                Pos2::new(cx - rad, cy + rad),
+                1.5 * std::f32::consts::PI,
+                std::f32::consts::TAU,
+                Pos2::new(x0, cy),
+                Pos2::new(cx, y1),
+            ),
+            '\u{256F}' => (
+                // ╯ left + up
+                Pos2::new(cx - rad, cy - rad),
+                0.0,
+                0.5 * std::f32::consts::PI,
+                Pos2::new(cx, y0),
+                Pos2::new(x0, cy),
+            ),
+            _ => (
+                // ╰ right + up
+                Pos2::new(cx + rad, cy - rad),
+                0.5 * std::f32::consts::PI,
+                std::f32::consts::PI,
+                Pos2::new(x1, cy),
+                Pos2::new(cx, y0),
+            ),
+        };
+        const STEPS: usize = 6;
+        let mut pts = Vec::with_capacity(STEPS + 3);
+        pts.push(p_start);
+        for i in 0..=STEPS {
+            let t = i as f32 / STEPS as f32;
+            let a = a0 + (a1 - a0) * t;
+            pts.push(Pos2::new(arc_center.x + a.cos() * rad, arc_center.y + a.sin() * rad));
+        }
+        pts.push(p_end);
+        painter.polyline(pts, stroke);
+        return;
+    }
+
+    // 3. Diagonals (╱ ╲ ╳).
+    if matches!(c, '\u{2571}'..='\u{2573}') {
+        let stroke = Stroke::new(lw, fg);
+        if c == '\u{2571}' || c == '\u{2573}' {
+            painter.line_segment([Pos2::new(x0, y1), Pos2::new(x1, y0)], stroke);
+        }
+        if c == '\u{2572}' || c == '\u{2573}' {
+            painter.line_segment([Pos2::new(x0, y0), Pos2::new(x1, y1)], stroke);
+        }
+        return;
+    }
+
+    // 4. Standard cardinal arms (light / heavy / double).
+    let Some((left, right, up, down)) = box_arms(c) else { return };
+    let half_w = |a: Arm| match a {
+        Arm::Heavy => hw * 0.5,
+        Arm::Light | Arm::Double => lw * 0.5,
+        Arm::None => 0.0,
+    };
+    let h_off = gap * 0.5;
+    let v_off = gap * 0.5;
+    let v_has_double = up == Arm::Double || down == Arm::Double;
+    let h_has_double = left == Arm::Double || right == Arm::Double;
+
+    // Junction extent so single/heavy arms meet cleanly at the center without notches.
+    let v_half = half_w(up).max(half_w(down)).max(if v_has_double { v_off + lw * 0.5 } else { 0.0 });
+    let h_half = half_w(left).max(half_w(right)).max(if h_has_double { h_off + lw * 0.5 } else { 0.0 });
+
+    let rect_h = |a: f32, b: f32, y: f32, half: f32| {
+        painter.rect_filled(Rect::from_min_max(Pos2::new(a.min(b), y - half), Pos2::new(a.max(b), y + half)), 0.0, fg);
+    };
+    let rect_v = |x: f32, a: f32, b: f32, half: f32| {
+        painter.rect_filled(Rect::from_min_max(Pos2::new(x - half, a.min(b)), Pos2::new(x + half, a.max(b))), 0.0, fg);
+    };
+
+    // Horizontal arms
+    match left {
+        Arm::Light | Arm::Heavy => {
+            let end = if v_has_double && right == Arm::None { cx - v_off + lw * 0.5 } else { cx + v_half };
+            rect_h(x0, end, cy, half_w(left));
+        }
+        Arm::Double => {
+            let top_end = if up == Arm::Double {
+                cx - v_off + lw * 0.5
+            } else if down == Arm::Double && right == Arm::None {
+                cx + v_off + lw * 0.5
+            } else {
+                cx + lw * 0.5
+            };
+            let bot_end = if down == Arm::Double {
+                cx - v_off + lw * 0.5
+            } else if up == Arm::Double && right == Arm::None {
+                cx + v_off + lw * 0.5
+            } else {
+                cx + lw * 0.5
+            };
+            rect_h(x0, top_end, cy - h_off, lw * 0.5);
+            rect_h(x0, bot_end, cy + h_off, lw * 0.5);
+        }
+        Arm::None => {}
+    }
+    match right {
+        Arm::Light | Arm::Heavy => {
+            let start = if v_has_double && left == Arm::None { cx + v_off - lw * 0.5 } else { cx - v_half };
+            rect_h(start, x1, cy, half_w(right));
+        }
+        Arm::Double => {
+            let top_start = if up == Arm::Double {
+                cx + v_off - lw * 0.5
+            } else if down == Arm::Double && left == Arm::None {
+                cx - v_off - lw * 0.5
+            } else {
+                cx - lw * 0.5
+            };
+            let bot_start = if down == Arm::Double {
+                cx + v_off - lw * 0.5
+            } else if up == Arm::Double && left == Arm::None {
+                cx - v_off - lw * 0.5
+            } else {
+                cx - lw * 0.5
+            };
+            rect_h(top_start, x1, cy - h_off, lw * 0.5);
+            rect_h(bot_start, x1, cy + h_off, lw * 0.5);
+        }
+        Arm::None => {}
+    }
+
+    // Vertical arms
+    match up {
+        Arm::Light | Arm::Heavy => {
+            let end = if h_has_double && down == Arm::None { cy - h_off + lw * 0.5 } else { cy + h_half };
+            rect_v(cx, y0, end, half_w(up));
+        }
+        Arm::Double => {
+            let left_end = if left == Arm::Double {
+                cy - h_off + lw * 0.5
+            } else if right == Arm::Double && down == Arm::None {
+                cy + h_off + lw * 0.5
+            } else {
+                cy + lw * 0.5
+            };
+            let right_end = if right == Arm::Double {
+                cy - h_off + lw * 0.5
+            } else if left == Arm::Double && down == Arm::None {
+                cy + h_off + lw * 0.5
+            } else {
+                cy + lw * 0.5
+            };
+            rect_v(cx - v_off, y0, left_end, lw * 0.5);
+            rect_v(cx + v_off, y0, right_end, lw * 0.5);
+        }
+        Arm::None => {}
+    }
+    match down {
+        Arm::Light | Arm::Heavy => {
+            let start = if h_has_double && up == Arm::None { cy + h_off - lw * 0.5 } else { cy - h_half };
+            rect_v(cx, start, y1, half_w(down));
+        }
+        Arm::Double => {
+            let left_start = if left == Arm::Double {
+                cy + h_off - lw * 0.5
+            } else if right == Arm::Double && up == Arm::None {
+                cy - h_off - lw * 0.5
+            } else {
+                cy - lw * 0.5
+            };
+            let right_start = if right == Arm::Double {
+                cy + h_off - lw * 0.5
+            } else if left == Arm::Double && up == Arm::None {
+                cy - h_off - lw * 0.5
+            } else {
+                cy - lw * 0.5
+            };
+            rect_v(cx - v_off, left_start, y1, lw * 0.5);
+            rect_v(cx + v_off, right_start, y1, lw * 0.5);
+        }
+        Arm::None => {}
+    }
 }
 
 type Frac = (f32, f32, f32, f32);
@@ -699,8 +1475,23 @@ pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
         Key::F10 => tilde(21),
         Key::F11 => tilde(23),
         Key::F12 => tilde(24),
-        Key::Space if m.ctrl => vec![0],
+        Key::Space if m.ctrl && !m.alt => vec![0x00],
+        Key::Space if m.alt && !m.ctrl => b"\x1b ".to_vec(),
+        // Ctrl+punctuation control codes (ESC, FS, GS, RS, US, NUL).
+        Key::OpenBracket if m.ctrl && !m.alt => vec![0x1b],
+        Key::Backslash if m.ctrl && !m.alt => vec![0x1c],
+        Key::CloseBracket if m.ctrl && !m.alt => vec![0x1d],
+        Key::Num6 if m.ctrl && !m.alt => vec![0x1e],
+        Key::Slash if m.ctrl && !m.alt => vec![0x1f],
+        Key::Minus if m.ctrl && !m.alt => vec![0x1f],
+        Key::Num2 if m.ctrl && !m.alt => vec![0x00],
         _ => {
+            if m.alt && !m.ctrl {
+                if let Some((unshifted, shifted)) = alt_symbol(key) {
+                    let b = if m.shift { shifted } else { unshifted };
+                    return Some(vec![0x1b, b]);
+                }
+            }
             let name = key.name();
             let mut chars = name.chars();
             let (Some(c), None) = (chars.next(), chars.next()) else { return None };
@@ -724,6 +1515,35 @@ pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// ASCII pair `(unshifted, shifted)` for digits and punctuation with Alt.
+fn alt_symbol(key: Key) -> Option<(u8, u8)> {
+    Some(match key {
+        Key::Num0 => (b'0', b')'),
+        Key::Num1 => (b'1', b'!'),
+        Key::Num2 => (b'2', b'@'),
+        Key::Num3 => (b'3', b'#'),
+        Key::Num4 => (b'4', b'$'),
+        Key::Num5 => (b'5', b'%'),
+        Key::Num6 => (b'6', b'^'),
+        Key::Num7 => (b'7', b'&'),
+        Key::Num8 => (b'8', b'*'),
+        Key::Num9 => (b'9', b'('),
+        Key::Period => (b'.', b'>'),
+        Key::Comma => (b',', b'<'),
+        Key::Slash => (b'/', b'?'),
+        Key::Backslash => (b'\\', b'|'),
+        Key::OpenBracket => (b'[', b'{'),
+        Key::CloseBracket => (b']', b'}'),
+        Key::Semicolon => (b';', b':'),
+        Key::Quote => (b'\'', b'"'),
+        Key::Backtick => (b'`', b'~'),
+        Key::Minus => (b'-', b'_'),
+        Key::Equals => (b'=', b'+'),
+        Key::Plus => (b'+', b'+'),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,6 +1563,34 @@ mod tests {
         assert_eq!(key_bytes(Key::A, none, false), None);
         assert_eq!(key_bytes(Key::Delete, none, false), Some(b"\x1b[3~".to_vec()));
         assert_eq!(key_bytes(Key::Backspace, none, false), Some(vec![0x7f]));
+        // Ctrl+punctuation & Alt+symbols
+        assert_eq!(key_bytes(Key::OpenBracket, Modifiers::CTRL, false), Some(vec![0x1b]));
+        assert_eq!(key_bytes(Key::Backslash, Modifiers::CTRL, false), Some(vec![0x1c]));
+        assert_eq!(key_bytes(Key::CloseBracket, Modifiers::CTRL, false), Some(vec![0x1d]));
+        assert_eq!(key_bytes(Key::Num6, Modifiers::CTRL, false), Some(vec![0x1e]));
+        assert_eq!(key_bytes(Key::Slash, Modifiers::CTRL, false), Some(vec![0x1f]));
+        assert_eq!(key_bytes(Key::Minus, Modifiers::CTRL | Modifiers::SHIFT, false), Some(vec![0x1f]));
+        assert_eq!(key_bytes(Key::Num2, Modifiers::CTRL, false), Some(vec![0x00]));
+        assert_eq!(key_bytes(Key::Period, Modifiers::ALT, false), Some(b"\x1b.".to_vec()));
+        assert_eq!(key_bytes(Key::Period, Modifiers::ALT | Modifiers::SHIFT, false), Some(b"\x1b>".to_vec()));
+    }
+
+    #[test]
+    fn dropped_paths_quoting() {
+        let p = vec![PathBuf::from(r"C:\src\main.rs"), PathBuf::from(r"C:\My Docs\a b.txt")];
+        assert_eq!(format_dropped_paths(&p), r#"C:\src\main.rs "C:\My Docs\a b.txt""#);
+    }
+
+    #[test]
+    fn box_drawing_covers_full_unicode_block() {
+        let ctx = egui::Context::default();
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 16.0));
+        for cp in 0x2500u32..=0x257Fu32 {
+            let c = char::from_u32(cp).unwrap();
+            let rec = Rec { ctx: &ctx, shapes: Default::default() };
+            draw_box_drawing(&rec, c, cell, Color32::WHITE);
+            assert!(!rec.shapes.borrow().is_empty(), "missing vector box-drawing for U+{cp:04X} ({c})");
+        }
     }
 }
 

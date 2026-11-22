@@ -358,6 +358,7 @@ impl App {
 
     pub(crate) fn terminal_or_placeholder(&mut self, ui: &mut egui::Ui, id: u64, status: Status, a: &Agent) {
         let font_size = self.state.settings.font_size;
+        let single_pane = self.view == View::Focus;
         if let Some(l) = self.live.get_mut(&id) {
             if self.focus_term == Some(id) {
                 ui.memory_mut(|m| m.request_focus(term_id(id)));
@@ -367,7 +368,7 @@ impl App {
                 "" => PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()),
                 c => PathBuf::from(c),
             };
-            let out = term_view::show(ui, &mut l.sess, term_id(id), font_size, &cwd);
+            let out = term_view::show(ui, &mut l.sess, term_id(id), font_size, &cwd, &mut l.search, single_pane);
             if out.typed {
                 l.interacted = true;
             }

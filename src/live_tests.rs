@@ -322,7 +322,7 @@ fn live_busy_probe() {
     // busy() must be true while Claude works on a prompt and false once it's done.
     crate::term::scrub_parent_session_env();
     let mut a = Agent::new(9006, "busy".into(), Provider::Claude);
-    a.cwd = std::env::temp_dir().join("agent-hub-live").to_string_lossy().into(); // already trusted
+    a.cwd = work_dir().to_string_lossy().into(); // already trusted
     a.model = "haiku".into();
     let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
     let sess = TermSession::spawn(launch.spec, 100, 30, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
@@ -391,7 +391,7 @@ fn live_question_probe() {
         (9009u64, "Use your AskUserQuestion tool to ask me whether I prefer tea or coffee. Do nothing else."),
     ] {
         let mut a = Agent::new(n, "ask".into(), Provider::Claude);
-        a.cwd = std::env::temp_dir().join("agent-hub-live").to_string_lossy().into(); // trusted
+        a.cwd = work_dir().to_string_lossy().into(); // trusted
         a.model = "haiku".into();
         let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
         let sess = TermSession::spawn(launch.spec, 100, 32, crate::term::SCROLLBACK, egui::Context::default()).unwrap();

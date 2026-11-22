@@ -1,23 +1,42 @@
 # Kennel
 
-A small Rust desktop app for running several AI coding agents side by side. Each agent is a
-**real interactive terminal** running the actual Claude Code or OpenCode TUI. The app tracks each
-agent's tokens and cost.
+A small Rust desktop app for running several AI coding agents side by side. Each agent runs in a
+**real interactive terminal** hosting the actual Claude Code or OpenCode TUI, with live status,
+token/context tracking, and persistent sessions and layout.
 
-- **Real terminals:** every agent runs in its own pseudo-terminal (Windows ConPTY), emulated with
-  `alacritty_terminal` and drawn with egui. You type straight into the TUI, with full keyboard,
-  mouse, scrollback, selection and copy/paste.
-- **Focus and Grid views:** one big terminal, or every running agent tiled. *Broadcast* sends the
-  same message to several agents at once.
-- **Sessions persist:** stopping and restarting an agent resumes its conversation (`--resume` for
-  Claude, `--session` for OpenCode).
-- **Cost and tokens:**
-  - Claude: read from its status line and from the `cost-state` records in its transcript.
-  - OpenCode: read from `opencode session export`.
-- **Status:** each agent shows Working, Ready or Exited, and an amber dot marks an agent that
-  finished while you were looking at another one.
-- **Storage:** agents and totals are kept in `%APPDATA%\Kennel\state.json`. No API keys are
-  stored; each CLI uses its own login.
+- **Real terminals:** every agent runs in its own pseudo-terminal (Windows ConPTY) attached to a
+  Win32 Job Object (no orphaned child trees), emulated with `alacritty_terminal` and drawn with
+  egui. Includes pixel-aligned vector box-drawing and block elements, full keyboard/mouse/IME
+  support, `Ctrl+click` to open URLs and file paths, right-click copy/paste, drag-and-drop file
+  path pasting, and incremental scrollback search (`Ctrl+Shift+F`).
+- **Focus and Grid views:** one full-size terminal with browser-style tabs, or every running agent
+  tiled with resizable splitters (double-click any divider to reset).
+- **Sessions & layout persist:** stopping and restarting an agent resumes its conversation
+  (`--resume` for Claude, `--session` for OpenCode), and agents running at exit auto-resume on next
+  launch. Window size, position, maximized state, active view, sidebar width, and grid split ratios
+  are saved automatically.
+- **Tokens & context:**
+  - Claude: reads token counts from transcripts and live context usage from its status line.
+  - OpenCode: reads token totals via `opencode session export`.
+- **Status & attention:** each agent shows Working (pulsing), Waiting for answer (`?` badge), Ready,
+  or Exited, with unread output counters and an amber dot when an unfocused agent needs you.
+- **Storage:** agents, settings, and window layout are kept in `%APPDATA%\Kennel\state.json`. No
+  API keys are stored; each CLI uses its own login.
+
+## Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Shift+G` | Toggle Focus / Grid view |
+| `Ctrl+Shift+N` | Open "New agent" menu |
+| `Ctrl+Shift+B` | Toggle sidebar |
+| `Ctrl+Shift+F` | Search active terminal scrollback (`Enter` / `Shift+Enter` next/prev, `Esc` close) |
+| `Ctrl+Shift+1`–`9` | Jump to agent 1–9 in Focus view |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Increase / decrease / reset terminal font size |
+| `Shift+PageUp` / `PageDown` / `Home` / `End` | Scroll terminal history |
+| `Ctrl+Click` | Open URL or file path under cursor |
+| Right-click | Copy selection, or paste clipboard if nothing is selected |
+| Drag & drop files | Paste quoted file paths into the target terminal |
 
 ## Download
 
@@ -48,4 +67,6 @@ logged in, and they use a little real usage.
 - OpenCode uses the model you last picked inside it with `/models`. Per-launch config only
   reaches a `--standalone` server, which has no login, so Kennel leaves the model to OpenCode.
 - Claude's status line is pointed at `kennel.exe --statusline <id>`. That small helper records
-  the cost and prints a one-line footer inside Claude's TUI.
+  live session metadata (including context fill) and prints a one-line footer inside Claude's TUI.
+- Optional per-agent instructions in the Edit dialog are passed as `--append-system-prompt` for
+  Claude and `--prompt` on a fresh session for OpenCode.

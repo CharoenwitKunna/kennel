@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Minor/patch crate updates in one weekly PR; CI must pass before merging.
+  # Compatible crate updates in one weekly PR; CI must pass before merging.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -8,6 +8,16 @@ updates:
     groups:
       crates:
         update-types: [minor, patch]
+    ignore:
+      # Breaking upgrades of the UI and terminal libraries need code porting;
+      # do those on purpose rather than as weekly PRs. (For 0.x crates a
+      # "minor" bump like 0.25 -> 0.26 is a breaking release.)
+      - dependency-name: "eframe"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "egui*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "alacritty_terminal"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     open-pull-requests-limit: 5
 
   - package-ecosystem: github-actions

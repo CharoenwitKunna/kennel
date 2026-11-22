@@ -2,7 +2,8 @@
 //! Run with `cargo test --release -- --ignored --nocapture --test-threads=1`.
 
 use crate::agent::{Agent, Provider, Settings};
-use crate::runner::{self, ClaudeTracker};
+use crate::runner;
+use crate::usage::{self, ClaudeTracker};
 use crate::term::TermSession;
 use eframe::egui;
 use std::path::PathBuf;
@@ -89,7 +90,7 @@ fn live_claude_terminal() {
     let _ = std::fs::remove_file(&dbg);
     launch.spec.args.extend(["--debug-file".into(), dbg.to_string_lossy().into()]);
     let sid = launch.session_id.clone();
-    let sess = TermSession::spawn(launch.spec, 110, 36, ctx.clone()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 110, 36, crate::term::SCROLLBACK, ctx.clone()).unwrap();
     let mut tracker = ClaudeTracker::new(agent.id, &sid);
 
     let hit = wait_for(&sess, &["trust", "Trust", "? for shortcuts", "for shortcuts", ">"], 40);
@@ -131,7 +132,7 @@ fn live_claude_terminal() {
     agent.session_usage = u;
     let launch = runner::launch(&agent, &settings, &app_exe()).unwrap();
     assert!(launch.resumed, "expected --resume");
-    let sess = TermSession::spawn(launch.spec, 110, 36, ctx).unwrap();
+    let sess = TermSession::spawn(launch.spec, 110, 36, crate::term::SCROLLBACK, ctx).unwrap();
     let mut tracker = ClaudeTracker::new(agent.id, &sid);
     wait_for(&sess, &["\u{276f}"], 20); // Claude's "❯" prompt
     wait_quiet(&sess, 1000, 10);
@@ -165,7 +166,7 @@ fn live_opencode_terminal() {
     println!("args: {:?} env: {:?}", launch.spec.args, launch.spec.env);
     let sid = launch.session_id.clone();
     let exe = launch.spec.program.clone();
-    let sess = TermSession::spawn(launch.spec, 110, 36, ctx).unwrap();
+    let sess = TermSession::spawn(launch.spec, 110, 36, crate::term::SCROLLBACK, ctx).unwrap();
     wait_for(&sess, &["Ask anything"], 20);
     wait_quiet(&sess, 1000, 10);
     dump("startup", &sess);
@@ -177,7 +178,7 @@ fn live_opencode_terminal() {
     assert!(got.is_some(), "prompt got no visible response at all");
 
     // Our pre-chosen session id must be the one OpenCode used.
-    let u = runner::opencode_session_usage(&exe, &sid, Some(&work_dir()));
+    let u = usage::opencode_session_usage(&exe, &sid, Some(&work_dir()));
     println!("session {sid} usage: {u:?}");
     let u = u.expect("export of our chosen session id failed");
     if got.as_deref() == Some("BANANA") {
@@ -202,7 +203,7 @@ fn live_key_probe() {
         cwd: None,
         env: Default::default(),
     };
-    let sess = TermSession::spawn(spec, 100, 20, egui::Context::default()).unwrap();
+    let sess = TermSession::spawn(spec, 100, 20, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
     std::thread::sleep(Duration::from_secs(3));
     sess.write(b"\x1b[B".to_vec());
     std::thread::sleep(Duration::from_millis(500));
@@ -244,7 +245,7 @@ fn live_color_probe() {
         if force {
             launch.spec.env.insert("FORCE_COLOR".into(), "3".into());
         }
-        let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+        let sess = TermSession::spawn(launch.spec, 100, 30, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
         wait_for(&sess, &["\u{276f}"], 20);
         wait_quiet(&sess, 1000, 10);
         println!("FORCE_COLOR={force}: {:?}", color_census(&sess));
@@ -278,7 +279,7 @@ fn live_idle_probe() {
     a.cwd = work_dir().to_string_lossy().into();
     a.model = "haiku".into();
     let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
-    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
     wait_for(&sess, &["trust", "\u{276f}"], 20);
     std::thread::sleep(Duration::from_secs(3));
     let mut last = sess.screen_text();
@@ -302,7 +303,7 @@ fn live_idle_probe_opencode() {
     crate::term::scrub_parent_session_env();
     let a = Agent::new(9005, "idle-oc".into(), Provider::OpenCode);
     let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
-    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
     wait_for(&sess, &["Ask anything"], 20);
     std::thread::sleep(Duration::from_secs(3));
     let mut last = sess.screen_text();
@@ -324,7 +325,7 @@ fn live_busy_probe() {
     a.cwd = std::env::temp_dir().join("agent-hub-live").to_string_lossy().into(); // already trusted
     a.model = "haiku".into();
     let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
-    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
     wait_for(&sess, &["\u{276f}"], 20);
     wait_quiet(&sess, 1500, 10);
     println!("idle before prompt: busy={}", sess.busy());
@@ -360,7 +361,7 @@ fn live_resume_home_probe() {
     };
     let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
     a.session_id = Some(launch.session_id.clone());
-    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
     accept_trust(&sess);
     submit_checked(&sess, "Remember the word MANGO. Reply only with the word READY.");
     let got = wait_for(&sess, &["{25cf} READY", "{25cf}"], 60);
@@ -372,7 +373,7 @@ fn live_resume_home_probe() {
 
     let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
     println!("second launch resumed={} args={:?}", launch.resumed, &launch.spec.args[..2]);
-    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
     std::thread::sleep(Duration::from_secs(4));
     dump("resume: first screen", &sess);
     accept_trust(&sess);
@@ -393,7 +394,7 @@ fn live_question_probe() {
         a.cwd = std::env::temp_dir().join("agent-hub-live").to_string_lossy().into(); // trusted
         a.model = "haiku".into();
         let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
-        let sess = TermSession::spawn(launch.spec, 100, 32, egui::Context::default()).unwrap();
+        let sess = TermSession::spawn(launch.spec, 100, 32, crate::term::SCROLLBACK, egui::Context::default()).unwrap();
         wait_for(&sess, &["\u{276f}"], 20);
         wait_quiet(&sess, 1500, 10);
         submit_checked(&sess, prompt);

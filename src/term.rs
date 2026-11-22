@@ -4,6 +4,7 @@
 use alacritty_terminal::event::{Event as TEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
@@ -15,7 +16,21 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Default scrollback per terminal (Settings can change it for new terminals).
 pub const SCROLLBACK: usize = 3000;
+
+/// What a terminal's last painted frame depended on. Same key = same picture,
+/// so the shapes from last time are reused instead of walking every cell.
+#[derive(Clone, PartialEq)]
+pub struct PaintKey {
+    pub generation: u64,
+    pub rect: egui::Rect,
+    pub cell: (f32, f32),
+    pub font_size: f32,
+    pub focused: bool,
+    pub display_offset: usize,
+    pub selection: Option<alacritty_terminal::selection::SelectionRange>,
+}
 
 #[derive(Clone, Copy)]
 pub struct Size {
@@ -49,6 +64,10 @@ pub struct Shared {
     pub title: Mutex<String>,
     writer: OnceLock<EventLoopSender>,
     window_size: Mutex<WindowSize>,
+    /// Bumped on every chunk of output (invalidates the paint cache).
+    generation: AtomicU64,
+    /// On screen right now? Hidden terminals don't force full-speed redraws.
+    visible: AtomicBool,
 }
 
 impl Shared {
@@ -70,7 +89,13 @@ impl EventListener for Listener {
                 let ms = s.start.elapsed().as_millis() as u64;
                 s.last_output_ms.store(ms.max(1), Ordering::Relaxed);
                 record_activity(&mut s.activity.lock().unwrap(), ms / SLOT_MS);
-                s.ctx.request_repaint();
+                s.generation.fetch_add(1, Ordering::Relaxed);
+                if s.visible.load(Ordering::Relaxed) {
+                    s.ctx.request_repaint();
+                } else {
+                    // Only badges / status change for a hidden terminal.
+                    s.ctx.request_repaint_after(HIDDEN_REPAINT);
+                }
             }
             TEvent::PtyWrite(text) => s.reply(text),
             TEvent::Title(t) => *s.title.lock().unwrap() = t,
@@ -105,6 +130,8 @@ pub struct TermSession {
     tx: EventLoopSender,
     pub pid: Option<u32>,
     size: Size,
+    /// Last painted frame and what it depended on (see `PaintKey`).
+    pub paint_cache: Option<(PaintKey, egui::Shape)>,
 }
 
 pub struct SpawnSpec {
@@ -115,7 +142,7 @@ pub struct SpawnSpec {
 }
 
 impl TermSession {
-    pub fn spawn(spec: SpawnSpec, cols: usize, rows: usize, ctx: egui::Context) -> std::io::Result<Self> {
+    pub fn spawn(spec: SpawnSpec, cols: usize, rows: usize, scrollback: usize, ctx: egui::Context) -> std::io::Result<Self> {
         let size = Size { cols: cols.max(20), rows: rows.max(5) };
         let ws = window_size(size, 8.0, 16.0);
         let mut env = spec.env;
@@ -149,15 +176,25 @@ impl TermSession {
             title: Mutex::new(String::new()),
             writer: OnceLock::new(),
             window_size: Mutex::new(ws),
+            generation: AtomicU64::new(0),
+            visible: AtomicBool::new(true),
         });
         let listener = Listener(shared.clone());
-        let config = Config { scrolling_history: SCROLLBACK, ..Default::default() };
+        let config = Config { scrolling_history: scrollback, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
         let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
         let tx = event_loop.channel();
         let _ = shared.writer.set(tx.clone());
         event_loop.spawn();
-        Ok(TermSession { term, shared, tx, pid, size })
+        Ok(TermSession { term, shared, tx, pid, size, paint_cache: None })
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.shared.generation.load(Ordering::Relaxed)
+    }
+
+    pub fn set_visible(&self, v: bool) {
+        self.shared.visible.store(v, Ordering::Relaxed);
     }
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
@@ -253,6 +290,22 @@ impl TermSession {
         self.shared.bell.swap(false, Ordering::Relaxed)
     }
 
+    /// Plain text of the bottom `n` lines of the live screen (where TUIs put
+    /// their prompts). Cheaper than `screen_text` for frequent checks.
+    pub fn tail_text(&self, n: usize) -> String {
+        let t = self.term.lock();
+        let g = t.grid();
+        let rows = g.screen_lines();
+        let cols = g.columns();
+        let mut out = String::with_capacity(n.min(rows) * (cols + 1));
+        for r in rows.saturating_sub(n)..rows {
+            let row = &g[Line(r as i32)];
+            out.extend((0..cols).map(|c| row[Column(c)].c));
+            out.push('\n');
+        }
+        out
+    }
+
     /// Plain text of the visible screen.
     pub fn screen_text(&self) -> String {
         let t = self.term.lock();
@@ -339,6 +392,9 @@ pub fn kill_tree(pid: u32) {
         let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
     }
 }
+
+/// How soon a hidden terminal's output is reflected (badges, status).
+const HIDDEN_REPAINT: Duration = Duration::from_millis(400);
 
 /// Activity is tracked in slots of this many ms.
 const SLOT_MS: u64 = 250;

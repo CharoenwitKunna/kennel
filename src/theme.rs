@@ -75,9 +75,21 @@ fn load(path: &str) -> Option<Arc<FontData>> {
     std::fs::read(path).ok().map(|b| Arc::new(FontData::from_owned(b)))
 }
 
+/// Set when Thai text shows up somewhere, so its font gets loaded (it isn't by default).
+pub static WANT_THAI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_thai(c: char) -> bool {
+    ('\u{0E00}'..='\u{0E7F}').contains(&c)
+}
+
+pub fn has_thai(s: &str) -> bool {
+    s.chars().any(is_thai)
+}
+
 /// Use Windows system fonts (nothing bundled): Segoe UI for the UI, Cascadia Mono /
-/// Consolas for terminals, plus Segoe UI Symbol and Leelawadee UI (Thai) as fallbacks.
-pub fn install_fonts(ctx: &egui::Context) {
+/// Consolas for terminals, plus Segoe UI Symbol as a fallback. Leelawadee UI (Thai)
+/// is only loaded when `thai` is set, to keep memory down for everyone else.
+pub fn install_fonts(ctx: &egui::Context, thai: bool) {
     let mut fonts = FontDefinitions::default();
     let dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()) + "\\Fonts\\";
     let mut add = |name: &str, files: &[&str]| -> bool {
@@ -93,7 +105,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     let ui_bold = add("ui-bold", &["segoeuib.ttf", "segoeui.ttf"]);
     let mono = add("mono", &["CascadiaMono.ttf", "consola.ttf"]);
     let sym = add("sym", &["seguisym.ttf"]);
-    let thai = add("thai", &["LeelawUI.ttf"]);
+    let thai = thai && add("thai", &["LeelawUI.ttf"]);
 
     let fallbacks: Vec<String> = [(sym, "sym"), (thai, "thai")]
         .iter()

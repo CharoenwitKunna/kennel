@@ -169,10 +169,17 @@ pub struct Settings {
     /// Sidebar collapsed (Ctrl+Shift+B / the ☰ button).
     #[serde(default)]
     pub sidebar_hidden: bool,
+    /// Lines of history each terminal keeps (applies to newly started agents).
+    #[serde(default = "default_scrollback")]
+    pub scrollback: usize,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn default_scrollback() -> usize {
+    crate::term::SCROLLBACK
 }
 
 fn default_font_size() -> f32 {
@@ -188,6 +195,7 @@ impl Default for Settings {
             last_folder: String::new(),
             auto_trust_on_resume: true,
             sidebar_hidden: false,
+            scrollback: default_scrollback(),
         }
     }
 }

@@ -1,6 +1,6 @@
 //! egui widget that draws a `TermSession` and forwards keyboard/mouse input to it.
 
-use crate::term::TermSession;
+use crate::term::{PaintKey, TermSession};
 use crate::theme;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -9,7 +9,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
-use eframe::egui::{self, Align2, Color32, EventFilter, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align2, Color32, EventFilter, FontId, Key, Modifiers, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use std::path::Path;
 
 const PAD: f32 = 6.0;
@@ -26,10 +26,19 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
     let font = FontId::monospace(font_size);
     // Cell width = the real advance of a long run (text is drawn in runs, so a
     // single glyph's rounded width would drift and clip the right edge).
-    let (cw, glyph_h) = ui.fonts(|f| {
-        let g = f.layout_no_wrap("M".repeat(100), font.clone(), Color32::WHITE);
-        (g.size().x / 100.0, f.row_height(&font))
-    });
+    // Measured once per font size / display scale, then remembered.
+    let metrics_id = egui::Id::new(("term_metrics", font_size.to_bits(), ui.ctx().pixels_per_point().to_bits()));
+    let (cw, glyph_h) = match ui.data(|d| d.get_temp::<(f32, f32)>(metrics_id)) {
+        Some(m) => m,
+        None => {
+            let m = ui.fonts(|f| {
+                let g = f.layout_no_wrap("M".repeat(100), font.clone(), Color32::WHITE);
+                (g.size().x / 100.0, f.row_height(&font))
+            });
+            ui.data_mut(|d| d.insert_temp(metrics_id, m));
+            m
+        }
+    };
     let glyph_h = glyph_h.ceil();
     let rect = ui.available_rect_before_wrap();
     let response = ui.interact(rect, id, Sense::click_and_drag());
@@ -213,7 +222,30 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
         }
     }
 
-    paint(ui, sess, rect, inner, &font, cw, ch, text_dy, focused);
+    // Reuse last frame's shapes when nothing they depend on has changed.
+    let key = {
+        let t = sess.term.lock();
+        PaintKey {
+            generation: sess.generation(),
+            rect,
+            cell: (cw, ch),
+            font_size,
+            focused,
+            display_offset: t.grid().display_offset(),
+            selection: t.selection.as_ref().and_then(|s| s.to_range(&*t)),
+        }
+    };
+    let painter = ui.painter_at(rect);
+    match &sess.paint_cache {
+        Some((k, shape)) if *k == key => {
+            painter.add(shape.clone());
+        }
+        _ => {
+            let shape = paint(ui.ctx(), sess, rect, inner, &font, cw, ch, text_dy, focused);
+            painter.add(shape.clone());
+            sess.paint_cache = Some((key, shape));
+        }
+    }
     if let Some((row, c0, c1)) = link {
         let y = inner.top() + (row as f32 + 1.0) * ch - 1.0;
         let x0 = inner.left() + c0 as f32 * cw;
@@ -306,13 +338,44 @@ fn open_target(target: &str) {
     }
 }
 
+/// Collects shapes instead of painting them, so a frame can be cached and reused.
+struct Rec<'a> {
+    ctx: &'a egui::Context,
+    shapes: std::cell::RefCell<Vec<Shape>>,
+}
+
+impl Rec<'_> {
+    fn push(&self, s: Shape) {
+        self.shapes.borrow_mut().push(s);
+    }
+    fn layout_no_wrap(&self, text: String, font: FontId, color: Color32) -> std::sync::Arc<egui::Galley> {
+        self.ctx.fonts(|f| f.layout_no_wrap(text, font, color))
+    }
+    fn text(&self, pos: Pos2, align: Align2, text: impl ToString, font: FontId, color: Color32) {
+        let galley = self.layout_no_wrap(text.to_string(), font, color);
+        let r = align.anchor_size(pos, galley.size());
+        self.push(Shape::galley(r.min, galley, color));
+    }
+    fn galley(&self, pos: Pos2, galley: std::sync::Arc<egui::Galley>, color: Color32) {
+        self.push(Shape::galley(pos, galley, color));
+    }
+    fn rect_filled(&self, rect: Rect, radius: f32, color: Color32) {
+        self.push(Shape::rect_filled(rect, radius, color));
+    }
+    fn rect_stroke(&self, rect: Rect, radius: f32, stroke: Stroke, kind: egui::StrokeKind) {
+        self.push(Shape::rect_stroke(rect, radius, stroke, kind));
+    }
+    fn line_segment(&self, pts: [Pos2; 2], stroke: Stroke) {
+        self.push(Shape::line_segment(pts, stroke));
+    }
+}
+
+/// Build the terminal's picture: background, cell backgrounds, then text.
 #[allow(clippy::too_many_arguments)]
-fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &FontId, cw: f32, ch: f32, text_dy: f32, focused: bool) {
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::TERM_BG);
-    // Cell backgrounds are collected and placed in this slot so they sit under all text.
-    let bg_slot = painter.add(egui::Shape::Noop);
-    let bg_shapes = std::cell::RefCell::new(Vec::<egui::Shape>::new());
+fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font: &FontId, cw: f32, ch: f32, text_dy: f32, focused: bool) -> Shape {
+    let painter = Rec { ctx, shapes: Default::default() };
+    // Cell backgrounds are collected separately so they sit under all text.
+    let bg_shapes = std::cell::RefCell::new(vec![Shape::rect_filled(rect, 0.0, theme::TERM_BG)]);
 
     let t = sess.term.lock();
     let content = t.renderable_content();
@@ -452,6 +515,9 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
             }
         } else {
             flush(&mut run);
+            if theme::is_thai(c) {
+                theme::WANT_THAI.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             let mut s = c.to_string();
             if let Some(z) = zw {
                 s.extend(z.iter());
@@ -484,7 +550,6 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
     }
     flush_bg(&mut bg_run);
     flush(&mut run);
-    painter.set(bg_slot, egui::Shape::Vec(bg_shapes.into_inner()));
 
     if content.display_offset > 0 {
         let label = format!("↑ {} lines", content.display_offset);
@@ -494,7 +559,10 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
         painter.rect_filled(r, 6.0, theme::RAISED);
         painter.galley(r.min + Vec2::new(6.0, 3.0), galley, theme::TEXT);
     }
-    let _ = t.grid().total_lines();
+    drop(t);
+    let mut all = bg_shapes.into_inner();
+    all.append(&mut painter.shapes.into_inner());
+    Shape::Vec(all)
 }
 
 type Frac = (f32, f32, f32, f32);

@@ -146,7 +146,7 @@ pub fn bold(size: f32) -> FontId {
 }
 
 pub fn apply_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     use FontFamily::*;
     style.text_styles = [
         (TextStyle::Heading, FontId::new(17.0, Name(BOLD.into()))),
@@ -211,5 +211,5 @@ pub fn apply_style(ctx: &egui::Context) {
     w.active.expansion = 0.0;
 
     w.open = w.active;
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }

@@ -169,10 +169,10 @@ pub(crate) fn window_edges(ctx: &egui::Context) {
     use egui::{CursorIcon as C, ResizeDirection as D};
     let (maximized, pos, pressed) =
         ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.pointer.hover_pos(), i.pointer.primary_pressed()));
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     if !maximized {
         // Hairline so the window edge is visible on any background.
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("frame"))).rect_stroke(
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("frame"))).rect_stroke(
             screen,
             0.0,
             Stroke::new(1.0_f32, BORDER),
@@ -291,7 +291,7 @@ pub(crate) fn provider_card(ui: &mut egui::Ui, p: Provider, sub: &str, selected:
             });
             ui.label(RichText::new(sub).small().color(MUTED));
         });
-    ui.interact(inner.response.rect, egui::Id::new(("provider_card", p as u8)), Sense::click())
+    ui.interact(inner.response.rect, egui::Id::unique(("provider_card", p as u8)), Sense::click())
 }
 
 pub(crate) fn empty_state(ui: &mut egui::Ui, actions: &mut Vec<Action>, folder: &mut String) {

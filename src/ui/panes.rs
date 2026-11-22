@@ -3,33 +3,30 @@
 use crate::*;
 
 impl App {
-    pub(crate) fn central(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(4))).show(
-            ctx,
-            |ui| {
-                let area = ui.max_rect();
-                if self.state.agents.is_empty() {
-                    empty_state(ui, &mut self.actions, &mut self.new_folder);
-                    return;
-                }
-                let key = (self.view, if self.view == View::Focus { self.selected } else { None });
-                if key != self.view_key {
-                    self.view_key = key;
-                    self.view_changed = Instant::now();
-                }
-                match self.view {
-                    View::Focus => self.focus_view(ui),
-                    View::Grid => self.grid_view(ui),
-                }
-                // Fade the new content in: a background-colored veil that clears quickly.
-                let t = self.view_changed.elapsed().as_secs_f32() / FADE;
-                if t < 1.0 {
-                    let veil = (1.0 - t).powi(2);
-                    ui.painter().rect_filled(area.expand(4.0), 0.0, BG.gamma_multiply(veil));
-                    ui.ctx().request_repaint();
-                }
-            },
-        );
+    pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(4))).show(ui, |ui| {
+            let area = ui.max_rect();
+            if self.state.agents.is_empty() {
+                empty_state(ui, &mut self.actions, &mut self.new_folder);
+                return;
+            }
+            let key = (self.view, if self.view == View::Focus { self.selected } else { None });
+            if key != self.view_key {
+                self.view_key = key;
+                self.view_changed = Instant::now();
+            }
+            match self.view {
+                View::Focus => self.focus_view(ui),
+                View::Grid => self.grid_view(ui),
+            }
+            // Fade the new content in: a background-colored veil that clears quickly.
+            let t = self.view_changed.elapsed().as_secs_f32() / FADE;
+            if t < 1.0 {
+                let veil = (1.0 - t).powi(2);
+                ui.painter().rect_filled(area.expand(4.0), 0.0, BG.gamma_multiply(veil));
+                ui.ctx().request_repaint();
+            }
+        });
     }
 
     pub(crate) fn focus_view(&mut self, ui: &mut egui::Ui) {
@@ -101,7 +98,7 @@ impl App {
                         if renaming {
                             continue;
                         }
-                        let resp = ui.interact(rect, egui::Id::new(("tab", a.id)), Sense::click());
+                        let resp = ui.interact(rect, egui::Id::unique(("tab", a.id)), Sense::click());
                         if resp.double_clicked() {
                             self.begin_rename(a.id);
                         }
@@ -171,7 +168,7 @@ impl App {
             let x = xs[c + 1] - gap / 2.0;
             let hit = egui::Rect::from_x_y_ranges(x - gap / 2.0..=x + gap / 2.0, area.y_range());
             let resp = ui
-                .interact(hit, egui::Id::new(("col_div", c)), Sense::click_and_drag())
+                .interact(hit, egui::Id::unique(("col_div", c)), Sense::click_and_drag())
                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
             if resp.dragged() {
                 resize_pair(&mut self.grid_cols, c, resp.drag_delta().x / avail_w);
@@ -187,7 +184,7 @@ impl App {
             let y = ys[r + 1] - gap / 2.0;
             let hit = egui::Rect::from_x_y_ranges(area.x_range(), y - gap / 2.0..=y + gap / 2.0);
             let resp = ui
-                .interact(hit, egui::Id::new(("row_div", r)), Sense::click_and_drag())
+                .interact(hit, egui::Id::unique(("row_div", r)), Sense::click_and_drag())
                 .on_hover_cursor(egui::CursorIcon::ResizeVertical);
             if resp.dragged() {
                 resize_pair(&mut self.grid_rows, r, resp.drag_delta().y / avail_h);
@@ -206,38 +203,34 @@ impl App {
         let id = a.id;
         ui.spacing_mut().item_spacing.x = 2.0;
         let more = ui.add(icon_button("⋯")).on_hover_text("More");
-        let menu_id = egui::Id::new(("pane_menu", id));
-        if more.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(menu_id));
-        }
-        egui::popup_below_widget(ui, menu_id, &more, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        egui::Popup::menu(&more).close_behavior(egui::PopupCloseBehavior::CloseOnClick).show(|ui| {
             ui.set_min_width(160.0);
             if ui.button("Rename").clicked() {
                 self.begin_rename(id);
-                ui.close_menu();
+                ui.close();
             }
             if status.alive() && ui.button("Restart").clicked() {
                 self.actions.push(Action::Restart(id));
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Edit…").clicked() {
                 self.actions.push(Action::Edit(id));
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("New session").clicked() {
                 self.actions.push(Action::NewSession(id));
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Copy session id").clicked() {
                 if let Some(s) = &a.session_id {
                     ui.ctx().copy_text(s.clone());
                 }
-                ui.close_menu();
+                ui.close();
             }
             ui.separator();
             if ui.button(RichText::new("Delete…").color(RED)).clicked() {
                 self.actions.push(Action::Delete(id));
-                ui.close_menu();
+                ui.close();
             }
         });
         let (icon, tip) =
@@ -286,7 +279,7 @@ impl App {
                 if in_grid {
                     // Empty space in the title row: double-click to maximize.
                     let title_rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 22.0));
-                    let title_bg = ui.interact(title_rect, egui::Id::new(("title", id)), Sense::click());
+                    let title_bg = ui.interact(title_rect, egui::Id::unique(("title", id)), Sense::click());
                     if title_bg.double_clicked() {
                         self.actions.push(Action::OpenFocus(id));
                     }
@@ -335,7 +328,7 @@ impl App {
     pub(crate) fn name_widget(&mut self, ui: &mut egui::Ui, a: &Agent, size: f32) {
         if self.renaming.as_ref().is_some_and(|(id, _)| *id == a.id) {
             // As wide as the name (plus room to type), so the title doesn't shrink.
-            let name_w = ui.fonts(|f| f.layout_no_wrap(a.name.clone(), bold(size), TEXT).size().x);
+            let name_w = ui.fonts_mut(|f| f.layout_no_wrap(a.name.clone(), bold(size), TEXT).size().x);
             let width = (name_w + 40.0).clamp(140.0, 320.0).min(ui.available_width() - 120.0);
             self.rename_box(ui, a.id, size, width);
             return;

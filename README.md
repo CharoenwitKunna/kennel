@@ -65,6 +65,14 @@ cargo build; cargo live        # live end-to-end tests against your logged-in CL
 The live tests open real Claude Code and OpenCode sessions, so they need both CLIs installed and
 logged in, and they use a little real usage.
 
+To check rendering (e.g. after upgrading egui), have Kennel screenshot its own frame and exit.
+Point `APPDATA` at a scratch folder first: Kennel starts the agents saved there.
+
+```powershell
+$env:APPDATA = "$env:TEMP\kennel-render"; $env:KENNEL_SCREENSHOT = "$env:TEMP\kennel.png"
+.\target\debug\kennel.exe
+```
+
 ## Permissions
 
 | Setting           | Claude Code                  | OpenCode |

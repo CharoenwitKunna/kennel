@@ -90,11 +90,11 @@ pub fn show(
     // Cell width = the real advance of a long run (text is drawn in runs, so a
     // single glyph's rounded width would drift and clip the right edge).
     // Measured once per font size / display scale, then remembered.
-    let metrics_id = egui::Id::new(("term_metrics", font_size.to_bits(), ui.ctx().pixels_per_point().to_bits()));
+    let metrics_id = egui::Id::unique(("term_metrics", font_size.to_bits(), ui.ctx().pixels_per_point().to_bits()));
     let (cw, glyph_h) = match ui.data(|d| d.get_temp::<(f32, f32)>(metrics_id)) {
         Some(m) => m,
         None => {
-            let m = ui.fonts(|f| {
+            let m = ui.fonts_mut(|f| {
                 let g = f.layout_no_wrap("M".repeat(100), font.clone(), Color32::WHITE);
                 (g.size().x / 100.0, f.row_height(&font))
             });
@@ -128,7 +128,7 @@ pub fn show(
     };
     let pill_rect = if display_offset > 0 {
         let label = format!("↑ {display_offset} lines");
-        let sz = ui.fonts(|f| f.layout_no_wrap(label, FontId::proportional(11.5), theme::TEXT).size());
+        let sz = ui.fonts_mut(|f| f.layout_no_wrap(label, FontId::proportional(11.5), theme::TEXT).size());
         let w = sz.x + 14.0;
         let h = sz.y + 6.0;
         let right = if history_size > 0 { rect.right() - 14.0 } else { rect.right() - 10.0 };
@@ -191,7 +191,21 @@ pub fn show(
     }
 
     if response.hovered() {
-        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        // Unsmoothed wheel movement in points (Ctrl+wheel is zoom, not scroll).
+        let scroll = ui.input(|i| {
+            i.raw
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::MouseWheel { unit, delta, modifiers, .. } if !modifiers.command => Some(match unit {
+                        egui::MouseWheelUnit::Point => delta.y,
+                        egui::MouseWheelUnit::Line => delta.y * ch,
+                        egui::MouseWheelUnit::Page => delta.y * response.rect.height(),
+                    }),
+                    _ => None,
+                })
+                .sum::<f32>()
+        });
         if scroll != 0.0 {
             let acc_id = id.with("scroll_acc");
             let acc: f32 = ui.data(|d| d.get_temp(acc_id).unwrap_or(0.0)) + scroll / ch;
@@ -273,7 +287,7 @@ pub fn show(
     // ---------- drag-and-drop files ----------
     let (hovered_files, dropped_paths) = ui.input(|i| {
         let hovered = !i.raw.hovered_files.is_empty();
-        let dropped: Vec<PathBuf> = i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect();
+        let dropped: Vec<PathBuf> = i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect();
         (hovered, dropped)
     });
     let drop_target =
@@ -480,7 +494,7 @@ pub fn show(
         painter.rect_filled(pill_rect, 6.0, fill);
         painter.rect_stroke(pill_rect, 6.0, Stroke::new(1.0_f32, theme::BORDER), egui::StrokeKind::Inside);
         let label = format!("↑ {live_offset} lines");
-        let galley = ui.fonts(|f| f.layout_no_wrap(label, FontId::proportional(11.5), theme::TEXT));
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap(label, FontId::proportional(11.5), theme::TEXT));
         painter.galley(pill_rect.center() - galley.size() / 2.0, galley, theme::TEXT);
         if pill_resp.clicked() {
             sess.scroll_to_bottom();
@@ -549,7 +563,7 @@ pub fn show(
     if hovered_files && drop_target {
         painter.rect_filled(rect, 4.0, theme::ACCENT.gamma_multiply(0.10));
         painter.rect_stroke(rect.shrink(1.0), 4.0, Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
-        let galley = ui.fonts(|f| f.layout_no_wrap("Drop to paste path".into(), theme::bold(13.0), theme::TEXT));
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap("Drop to paste path".into(), theme::bold(13.0), theme::TEXT));
         let badge = Rect::from_center_size(rect.center(), galley.size() + Vec2::new(20.0, 12.0));
         painter.rect_filled(badge, 8.0, theme::RAISED);
         painter.rect_stroke(badge, 8.0, Stroke::new(1.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
@@ -766,7 +780,7 @@ impl Rec<'_> {
         self.shapes.borrow_mut().push(s);
     }
     fn layout_no_wrap(&self, text: String, font: FontId, color: Color32) -> std::sync::Arc<egui::Galley> {
-        self.ctx.fonts(|f| f.layout_no_wrap(text, font, color))
+        self.ctx.fonts_mut(|f| f.layout_no_wrap(text, font, color))
     }
     fn text(&self, pos: Pos2, align: Align2, text: impl ToString, font: FontId, color: Color32) {
         let galley = self.layout_no_wrap(text.to_string(), font, color);

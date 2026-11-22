@@ -3,19 +3,20 @@
 use crate::*;
 
 impl App {
-    pub(crate) fn toolbar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(32.0)
+    pub(crate) fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
+        egui::Panel::top("toolbar")
+            .exact_size(32.0)
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
                     .inner_margin(Margin { left: 6, right: 0, top: 0, bottom: 0 })
                     .stroke(Stroke::new(1.0_f32, BORDER)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // Empty toolbar space acts as the title bar. Registered first so
                 // the buttons drawn on top keep their clicks.
-                let bar = ui.interact(ui.max_rect(), egui::Id::new("titlebar"), Sense::click_and_drag());
+                let bar = ui.interact(ui.max_rect(), egui::Id::unique("titlebar"), Sense::click_and_drag());
                 let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 if bar.double_clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
@@ -52,22 +53,16 @@ impl App {
                         ui.add_space(8.0);
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let resp = ui.add(primary_button("+  New agent")).on_hover_text("Ctrl+Shift+N");
-                        let popup_id = egui::Id::new("new_agent_menu");
-                        if resp.clicked() || std::mem::take(&mut self.open_new_menu) {
-                            ui.memory_mut(|m| m.toggle_popup(popup_id));
-                        }
-                        egui::popup_below_widget(
-                            ui,
-                            popup_id,
-                            &resp,
-                            egui::PopupCloseBehavior::CloseOnClickOutside,
-                            |ui| {
+                        let toggle = resp.clicked() || std::mem::take(&mut self.open_new_menu);
+                        egui::Popup::from_response(&resp)
+                            .open_memory(toggle.then_some(egui::SetOpenCommand::Toggle))
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
                                 if let Some(p) = new_agent_menu(ui, &mut self.new_folder) {
                                     self.actions.push(Action::Create(p));
-                                    ui.memory_mut(|m| m.close_popup());
+                                    ui.close();
                                 }
-                            },
-                        );
+                            });
                         if ui.add(icon_button("⚙")).on_hover_text("Settings").clicked() {
                             self.show_settings = !self.show_settings;
                             self.cli_cache = None;
@@ -122,17 +117,17 @@ impl App {
             });
     }
 
-    pub(crate) fn sidebar(&mut self, ctx: &egui::Context) {
+    pub(crate) fn sidebar(&mut self, ui: &mut egui::Ui) {
         if self.state.settings.sidebar_hidden {
             return;
         }
         let saved_w = self.state.layout.sidebar_width.unwrap_or(184.0).clamp(150.0, 360.0);
-        let resp = egui::SidePanel::left("sidebar")
+        let resp = egui::Panel::left("sidebar")
             .resizable(true)
-            .default_width(saved_w)
-            .width_range(150.0..=360.0)
+            .default_size(saved_w)
+            .size_range(150.0..=360.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(4)).stroke(Stroke::new(1.0_f32, BORDER)))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 if self.state.agents.is_empty() {
                     ui.add_space(16.0);
                     ui.vertical_centered(|ui| {
@@ -169,33 +164,33 @@ impl App {
                             ui.set_min_width(160.0);
                             if ui.button("Rename").clicked() {
                                 self.begin_rename(a.id);
-                                ui.close_menu();
+                                ui.close();
                             }
                             if status.alive() {
                                 if ui.button("Restart").clicked() {
                                     self.actions.push(Action::Restart(a.id));
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                                 if ui.button("Stop").clicked() {
                                     self.actions.push(Action::Stop(a.id));
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             } else if ui.button("Start").clicked() {
                                 self.actions.push(Action::Start(a.id));
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("Edit…").clicked() {
                                 self.actions.push(Action::Edit(a.id));
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("New session").clicked() {
                                 self.actions.push(Action::NewSession(a.id));
-                                ui.close_menu();
+                                ui.close();
                             }
                             ui.separator();
                             if ui.button(RichText::new("Delete…").color(RED)).clicked() {
                                 self.actions.push(Action::Delete(a.id));
-                                ui.close_menu();
+                                ui.close();
                             }
                         });
                     }
@@ -304,7 +299,7 @@ impl App {
         if renaming {
             return (rect, None);
         }
-        let resp = ui.interact(rect, egui::Id::new(("card", a.id)), Sense::click_and_drag());
+        let resp = ui.interact(rect, egui::Id::unique(("card", a.id)), Sense::click_and_drag());
         if self.dragging == Some(a.id) {
             ui.painter().rect_filled(rect, 6.0, Color32::from_black_alpha(110));
         }

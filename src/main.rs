@@ -58,8 +58,7 @@ fn main() -> eframe::Result {
     if state.layout.maximized {
         viewport = viewport.with_maximized(true);
     }
-    let options =
-        eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, vsync: true, ..Default::default() };
+    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
     eframe::run_native("Kennel", options, Box::new(move |cc| Ok(Box::new(App::new(cc, state)))))
 }
 
@@ -212,7 +211,7 @@ struct App {
 const FADE: f32 = 0.16;
 
 fn term_id(agent_id: u64) -> egui::Id {
-    egui::Id::new(("term", agent_id))
+    egui::Id::unique(("term", agent_id))
 }
 
 impl App {
@@ -773,8 +772,31 @@ impl App {
     }
 }
 
+/// `KENNEL_SCREENSHOT=out.png`: after `KENNEL_SCREENSHOT_DELAY` seconds (default
+/// 2), save what was actually rendered and exit. For checking rendering (e.g.
+/// after a GUI library upgrade); point APPDATA at a scratch folder first, since
+/// it starts the agents saved there.
+fn screenshot_for_testing(ctx: &egui::Context) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    static REQUESTED: AtomicBool = AtomicBool::new(false);
+    let Some(path) = std::env::var_os("KENNEL_SCREENSHOT") else { return };
+    let delay: f32 = std::env::var("KENNEL_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(2.0);
+    ctx.request_repaint();
+    if START.get_or_init(Instant::now).elapsed().as_secs_f32() >= delay && !REQUESTED.swap(true, Ordering::Relaxed) {
+        ctx.request_screenshot(move |img| {
+            let [w, h] = img.size;
+            let ok = image::RgbaImage::from_raw(w as u32, h as u32, img.as_raw().to_vec()).map(|i| i.save(&path));
+            std::process::exit(if matches!(ok, Some(Ok(()))) { 0 } else { 1 });
+        });
+    }
+}
+
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
+        screenshot_for_testing(ctx);
         if !self.autostarted {
             self.autostarted = true;
             let ids: Vec<u64> = self.state.agents.iter().filter(|a| a.resume_on_launch).map(|a| a.id).collect();
@@ -785,9 +807,9 @@ impl eframe::App for App {
         self.ensure_thai_font(ctx);
         self.tick(ctx);
         self.shortcuts(ctx);
-        self.toolbar(ctx);
-        self.sidebar(ctx);
-        self.central(ctx);
+        self.toolbar(ui);
+        self.sidebar(ui);
+        self.central(ui);
         self.editor_window(ctx);
         self.settings_window(ctx);
         self.delete_window(ctx);

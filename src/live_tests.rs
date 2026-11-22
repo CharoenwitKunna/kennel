@@ -48,6 +48,19 @@ fn dump(label: &str, sess: &TermSession) {
     }
 }
 
+/// Type a prompt and press Enter, retrying until the TUI shows it was received
+/// (an input box that is still mounting silently drops keystrokes).
+fn submit_checked(sess: &TermSession, text: &str) {
+    let probe: String = text.chars().take(24).collect();
+    for _ in 0..4 {
+        sess.submit(text);
+        if wait_for(sess, &[probe.as_str()], 4).is_some() {
+            return;
+        }
+    }
+    panic!("TUI never accepted the prompt");
+}
+
 fn wait_quiet(sess: &TermSession, quiet_ms: u64, max_secs: u64) {
     let deadline = Instant::now() + Duration::from_secs(max_secs);
     while Instant::now() < deadline {
@@ -97,11 +110,11 @@ fn live_claude_terminal() {
         wait_for(&sess, &["for shortcuts", "Try \""], 20);
         wait_quiet(&sess, 1000, 10);
     }
-    sess.submit("Reply with the word PONG spelled backwards, nothing else.");
-    let got = wait_for(&sess, &["GNOP", "rror"], 60);
+    submit_checked(&sess, "Reply with the word banana in uppercase letters, nothing else.");
+    let got = wait_for(&sess, &["BANANA", "rror"], 60);
     wait_quiet(&sess, 1000, 10);
     dump("after prompt", &sess);
-    assert_eq!(got.as_deref(), Some("GNOP"), "no reply on screen");
+    assert_eq!(got.as_deref(), Some("BANANA"), "no reply on screen");
 
     std::thread::sleep(Duration::from_secs(2));
     let u = tracker.poll();
@@ -125,8 +138,8 @@ fn live_claude_terminal() {
     let live0 = std::fs::read_to_string(runner::live_file(agent.id)).unwrap_or_default();
     let v0: serde_json::Value = serde_json::from_str(&live0).unwrap_or_default();
     println!("status-line cost right after resume (before any prompt): {:?}", v0["cost"]["total_cost_usd"]);
-    sess.submit("Now reply with the word ZIP spelled backwards, nothing else.");
-    let got = wait_for(&sess, &["PIZ", "rror"], 60);
+    submit_checked(&sess, "Now reply with the word cherry in uppercase letters, nothing else.");
+    let got = wait_for(&sess, &["CHERRY", "rror"], 60);
     wait_quiet(&sess, 1000, 10);
     dump("after resume prompt", &sess);
     std::thread::sleep(Duration::from_secs(2));
@@ -134,7 +147,7 @@ fn live_claude_terminal() {
     println!("usage after resume: {u2:?}");
     let live = std::fs::read_to_string(runner::live_file(agent.id)).unwrap_or_default();
     println!("statusline json after resume: {}", &live[..live.len().min(600)]);
-    assert_eq!(got.as_deref(), Some("PIZ"));
+    assert_eq!(got.as_deref(), Some("CHERRY"));
     assert!(u2.output > u.output, "resumed tokens should accumulate");
     assert!(u2.cost_usd > u.cost_usd, "resumed cost should accumulate");
     sess.kill();
@@ -144,7 +157,6 @@ fn live_claude_terminal() {
 #[ignore]
 fn live_opencode_terminal() {
     let mut agent = Agent::new(9002, "live-opencode".into(), Provider::OpenCode);
-    agent.model = "opencode/hy4-flash-free".into();
     agent.cwd = work_dir().to_string_lossy().into();
     let settings = Settings::default();
     let ctx = egui::Context::default();
@@ -157,8 +169,8 @@ fn live_opencode_terminal() {
     wait_for(&sess, &["Ask anything"], 20);
     wait_quiet(&sess, 1000, 10);
     dump("startup", &sess);
-    sess.submit("Reply with the word PONG spelled backwards, nothing else.");
-    let got = wait_for(&sess, &["GNOP", "free messages", "rror", "Credits"], 60);
+    submit_checked(&sess, "Reply with the word banana in uppercase letters, nothing else.");
+    let got = wait_for(&sess, &["BANANA", "free messages", "rror", "Credits"], 60);
     wait_quiet(&sess, 1000, 10);
     dump("after prompt", &sess);
     println!("reply check: {got:?}");
@@ -168,7 +180,7 @@ fn live_opencode_terminal() {
     let u = runner::opencode_session_usage(&exe, &sid, Some(&work_dir()));
     println!("session {sid} usage: {u:?}");
     let u = u.expect("export of our chosen session id failed");
-    if got.as_deref() == Some("GNOP") {
+    if got.as_deref() == Some("BANANA") {
         assert!(u.total_tokens() > 0);
     }
     let quiet = sess.quiet_for();

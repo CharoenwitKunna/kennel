@@ -29,19 +29,13 @@ impl Provider {
     pub fn default_model(self) -> &'static str {
         match self {
             Provider::Claude => "",
-            Provider::OpenCode => "opencode/hy4-flash-free",
+            Provider::OpenCode => "",
         }
     }
     pub fn model_suggestions(self) -> &'static [&'static str] {
         match self {
             Provider::Claude => &["sonnet", "opus", "haiku"],
-            Provider::OpenCode => &[
-                "opencode/hy4-flash-free",
-                "opencode/deepseek-v4.1-flash-free",
-                "opencode/mimo-v2.6-flash-free",
-                "opencode/nemotron-3.5-super-vl-free",
-                "kilo/kilo-auto/free",
-            ],
+            Provider::OpenCode => &[],
         }
     }
 }

@@ -150,7 +150,7 @@ pub fn launch(agent: &Agent, settings: &Settings, self_exe: &Path) -> Result<Lau
     };
     let model = agent.model.trim();
     let mut args = Vec::new();
-    let mut env = HashMap::new();
+    let env = HashMap::new();
     let (session_id, resumed);
 
     match agent.provider {
@@ -194,12 +194,8 @@ pub fn launch(agent: &Agent, settings: &Settings, self_exe: &Path) -> Result<Lau
             if !resumed && !agent.system_prompt.trim().is_empty() {
                 args.extend(["--prompt".into(), agent.system_prompt.trim().into()]);
             }
-            if !model.is_empty() {
-                // The shared background service ignores our env, so a chosen model
-                // needs a private server (--standalone) that inherits it.
-                args.push("--standalone".into());
-                env.insert("OPENCODE_CONFIG_CONTENT".into(), serde_json::json!({ "model": model }).to_string());
-            }
+            // No model flag: the OpenCode TUI uses the model last picked with /models.
+            // (Config overrides only reach a --standalone server, which has no login.)
         }
     }
     Ok(Launch { spec: SpawnSpec { program: exe, args, cwd, env }, session_id, resumed })

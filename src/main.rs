@@ -698,7 +698,7 @@ impl App {
                     });
                 });
                 ui.add_space(2.0);
-                let model = if a.model.trim().is_empty() { "default model" } else { a.model.trim() };
+                let model = if a.provider == Provider::OpenCode { "model from /models" } else if a.model.trim().is_empty() { "default model" } else { a.model.trim() };
                 let folder = if a.cwd.trim().is_empty() { "home folder" } else { a.cwd.trim() };
                 ui.label(
                     RichText::new(format!("{model}  ·  {}  ·  {folder}", a.permission.label())).small().color(MUTED),
@@ -894,8 +894,21 @@ impl App {
                 });
                 ui.add_space(8.0);
                 field_label(ui, "Model");
+                if draft.provider == Provider::OpenCode {
+                    draft.model.clear();
+                    egui::Frame::new().fill(RAISED).corner_radius(8).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new(
+                                "OpenCode uses the model you last picked inside it. Type /models in its terminal to switch (e.g. Hy4 Flash Free).",
+                            )
+                            .small()
+                            .color(MUTED),
+                        );
+                    });
+                } else {
                 ui.horizontal(|ui| {
-                    let hint = if draft.provider == Provider::Claude { "default" } else { "default (or pick with /models)" };
+                    let hint = "default";
                     ui.add(
                         egui::TextEdit::singleline(&mut draft.model)
                             .hint_text(hint)
@@ -916,6 +929,7 @@ impl App {
                         }
                     });
                 });
+                }
                 ui.add_space(8.0);
                 field_label(ui, "Folder");
                 ui.add(
@@ -1316,7 +1330,7 @@ fn agent_card(ui: &mut egui::Ui, a: &Agent, status: Status, selected: bool, atte
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| status_pill(ui, status));
             });
-            let model = if a.model.trim().is_empty() { "default" } else { a.model.trim() };
+            let model = if a.provider == Provider::OpenCode { "/models" } else if a.model.trim().is_empty() { "default" } else { a.model.trim() };
             ui.label(RichText::new(format!("{} · {model}", a.provider.label())).small().color(MUTED));
             let u = a.total_usage();
             ui.horizontal(|ui| {

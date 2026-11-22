@@ -110,8 +110,9 @@ impl EventListener for Listener {
                 let ws = *s.window_size.lock().unwrap();
                 s.reply(fmt(ws));
             }
-            TEvent::ChildExit(code) => {
-                s.exit_code.store(code, Ordering::Relaxed);
+            TEvent::ChildExit(status) => {
+                // No code (killed by a signal) counts as a failure.
+                s.exit_code.store(status.code().unwrap_or(-1), Ordering::Relaxed);
                 s.exited.store(true, Ordering::Relaxed);
                 s.ctx.request_repaint();
             }

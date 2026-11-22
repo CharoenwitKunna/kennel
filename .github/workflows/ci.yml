@@ -24,7 +24,7 @@ jobs:
     name: Format & lint
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -38,7 +38,7 @@ jobs:
     name: Test & build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # Caches ~/.cargo and target/ so dependency builds happen once, not every run.
       - uses: Swatinem/rust-cache@v2
@@ -71,7 +71,7 @@ jobs:
           "$hash  kennel.exe" | Out-File -Encoding ascii -NoNewline target/release/kennel.exe.sha256
 
       - name: Upload exe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kennel-windows
           path: |
@@ -88,7 +88,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The updater compares the release tag with the version built into the
       # exe; if they differ it would offer the same update forever.
@@ -100,12 +100,12 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: kennel-windows
           path: dist
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/kennel.exe

@@ -17,7 +17,7 @@ impl App {
             .fixed_size([500.0, 0.0])
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
-                    .max_height((ctx.screen_rect().height() - 110.0).max(220.0))
+                    .max_height((ctx.content_rect().height() - 110.0).max(220.0))
                     .show(ui, |ui| {
                 field_label(ui, "Name");
                 ui.add(
@@ -67,12 +67,12 @@ impl App {
                         ui.set_min_width(260.0);
                         if ui.button("Default").clicked() {
                             draft.model.clear();
-                            ui.close_menu();
+                            ui.close();
                         }
                         for m in draft.provider.model_suggestions() {
                             if ui.button(*m).clicked() {
                                 draft.model = m.to_string();
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -341,7 +341,7 @@ impl App {
         if self.toasts.is_empty() {
             return;
         }
-        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -40.0)).show(
+        egui::Area::new(egui::Id::unique("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -40.0)).show(
             ctx,
             |ui| {
                 for (_, msg) in &self.toasts {

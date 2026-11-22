@@ -166,6 +166,9 @@ pub struct Settings {
     pub opencode_path: String,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
+    /// Folder new agents open in (the last one used).
+    #[serde(default)]
+    pub last_folder: String,
 }
 
 fn default_font_size() -> f32 {
@@ -174,7 +177,12 @@ fn default_font_size() -> f32 {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { claude_path: String::new(), opencode_path: String::new(), font_size: default_font_size() }
+        Settings {
+            claude_path: String::new(),
+            opencode_path: String::new(),
+            font_size: default_font_size(),
+            last_folder: String::new(),
+        }
     }
 }
 

@@ -134,6 +134,8 @@ enum Action {
     Delete(u64),
     OpenFocus(u64),
     NewAgent,
+    /// Create an agent for this app and open its terminal right away.
+    Create(Provider),
 }
 
 struct App {
@@ -156,6 +158,10 @@ struct App {
     focus_term: Option<u64>,
     /// Agents flagged `resume_on_launch` have been started.
     autostarted: bool,
+    /// Open the "New agent" dropdown on the next frame.
+    open_new_menu: bool,
+    /// Folder shown in the "New agent" dropdown.
+    new_folder: String,
     toasts: Vec<(Instant, String)>,
     actions: Vec<Action>,
 }
@@ -171,6 +177,7 @@ impl App {
         let state = State::load();
         let (bg_tx, bg_rx) = channel();
         let selected = state.agents.first().map(|a| a.id);
+        let new_folder = state.settings.last_folder.clone();
         App {
             state,
             live: HashMap::new(),
@@ -190,6 +197,8 @@ impl App {
             mem: (Instant::now() - Duration::from_secs(10), None),
             focus_term: None,
             autostarted: false,
+            open_new_menu: false,
+            new_folder,
             toasts: Vec::new(),
             actions: Vec::new(),
         }
@@ -247,6 +256,31 @@ impl App {
         );
         self.focus_term = Some(id);
         self.dirty = true;
+    }
+
+    /// "New agent" picker: create an agent for `p` in the chosen folder and
+    /// open its terminal immediately.
+    fn create_agent(&mut self, p: Provider, ctx: &egui::Context) {
+        let folder = match self.new_folder.trim() {
+            "" => std::env::var("USERPROFILE").unwrap_or_default(),
+            f => f.to_string(),
+        };
+        if !std::path::Path::new(&folder).is_dir() {
+            return self.toast(format!("Folder not found: {folder}"));
+        }
+        let mut n = self.state.agents.iter().filter(|a| a.provider == p).count() + 1;
+        while self.state.agents.iter().any(|a| a.name == format!("{} {n}", p.label())) {
+            n += 1;
+        }
+        let id = self.state.alloc_id();
+        let mut agent = Agent::new(id, format!("{} {n}", p.label()), p);
+        agent.cwd = folder.clone();
+        agent.model = p.default_model().into();
+        self.state.agents.push(agent);
+        self.state.settings.last_folder = folder;
+        self.selected = Some(id);
+        self.dirty = true;
+        self.start(id, ctx);
     }
 
     fn stop(&mut self, id: u64) {
@@ -386,7 +420,8 @@ impl App {
                     }
                 }
                 Action::Delete(id) => self.confirm_delete = Some(id),
-                Action::NewAgent => self.editor = Some((None, Draft::default())),
+                Action::NewAgent => self.open_new_menu = true,
+                Action::Create(p) => self.create_agent(p, ctx),
             }
         }
     }
@@ -414,9 +449,23 @@ impl App {
                     ui.add_space(18.0);
                     segmented(ui, &mut self.view);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(primary_button("+  New agent")).on_hover_text("Ctrl+Shift+N").clicked() {
-                            self.actions.push(Action::NewAgent);
+                        let resp = ui.add(primary_button("+  New agent")).on_hover_text("Ctrl+Shift+N");
+                        let popup_id = egui::Id::new("new_agent_menu");
+                        if resp.clicked() || std::mem::take(&mut self.open_new_menu) {
+                            ui.memory_mut(|m| m.toggle_popup(popup_id));
                         }
+                        egui::popup_below_widget(
+                            ui,
+                            popup_id,
+                            &resp,
+                            egui::PopupCloseBehavior::CloseOnClickOutside,
+                            |ui| {
+                                if let Some(p) = new_agent_menu(ui, &mut self.new_folder) {
+                                    self.actions.push(Action::Create(p));
+                                    ui.memory_mut(|m| m.close_popup());
+                                }
+                            },
+                        );
                         if ui.add(ghost_button("⚙")).on_hover_text("Settings").clicked() {
                             self.show_settings = !self.show_settings;
                         }
@@ -581,7 +630,7 @@ impl App {
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(12)))
             .show(ctx, |ui| {
                 if self.state.agents.is_empty() {
-                    empty_state(ui, &mut self.actions);
+                    empty_state(ui, &mut self.actions, &mut self.new_folder);
                     return;
                 }
                 if self.live.values().any(|l| l.sess.exited().is_none()) {
@@ -665,7 +714,7 @@ impl App {
             |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    provider_badge(ui, a.provider);
+                    app_icon(ui, a.provider, 26.0);
                     ui.label(RichText::new(&a.name).font(bold(19.0)));
                     status_pill(ui, status);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -781,8 +830,7 @@ impl App {
                     ui.set_min_size(ui.available_size());
                     ui.horizontal(|ui| {
                         ui.add_space(4.0);
-                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.0, a.provider.color());
+                        app_icon(ui, a.provider, 18.0);
                         ui.label(RichText::new(&a.name).font(bold(13.5)));
                         status_pill(ui, status);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -978,18 +1026,6 @@ impl App {
                         draft.permission = p;
                     }
                     ui.add_space(2.0);
-                }
-                ui.add_space(8.0);
-                field_label(ui, "Role / instructions (optional)");
-                ui.add(
-                    egui::TextEdit::multiline(&mut draft.system_prompt)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("e.g. You write tests. Only touch files under tests/.")
-                        .margin(Margin::symmetric(8, 6)),
-                );
-                if draft.provider == Provider::OpenCode {
-                    ui.label(RichText::new("OpenCode gets this as the first message of a new session.").small().color(MUTED));
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -1297,10 +1333,6 @@ fn status_pill(ui: &mut egui::Ui, s: Status) {
     pill(ui, &s.label(), s.color(), true);
 }
 
-fn provider_badge(ui: &mut egui::Ui, p: Provider) {
-    pill(ui, p.label(), p.color(), false);
-}
-
 fn chip(ui: &mut egui::Ui, text: &str, color: Color32, on: bool) -> egui::Response {
     let fg = if on { TEXT } else { FAINT };
     let btn = egui::Button::new(RichText::new(text).small().color(fg))
@@ -1349,6 +1381,7 @@ fn agent_card(ui: &mut egui::Ui, a: &Agent, status: Status, selected: bool, atte
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
+                app_icon(ui, a.provider, 18.0);
                 ui.label(RichText::new(&a.name).font(bold(14.0)));
                 if attention {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
@@ -1372,11 +1405,6 @@ fn agent_card(ui: &mut egui::Ui, a: &Agent, status: Status, selected: bool, atte
     let rect = inner.response.rect;
     let resp = ui.interact(rect, egui::Id::new(("card", a.id)), Sense::click());
     let p = ui.painter();
-    p.rect_filled(
-        egui::Rect::from_min_size(rect.min + Vec2::new(6.0, 10.0), Vec2::new(3.0, rect.height() - 20.0)),
-        2.0,
-        a.provider.color(),
-    );
     if resp.hovered() && !selected {
         p.rect_filled(rect, 10.0, Color32::from_white_alpha(6));
     }
@@ -1401,21 +1429,104 @@ fn provider_card(ui: &mut egui::Ui, p: Provider, sub: &str, selected: bool) -> e
     ui.interact(inner.response.rect, egui::Id::new(("provider_card", p as u8)), Sense::click())
 }
 
-fn empty_state(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+fn empty_state(ui: &mut egui::Ui, actions: &mut Vec<Action>, folder: &mut String) {
     ui.vertical_centered(|ui| {
-        ui.add_space((ui.available_height() / 2.0 - 110.0).max(20.0));
-        ui.label(RichText::new("◆").size(40.0).color(ACCENT));
+        ui.add_space((ui.available_height() / 2.0 - 150.0).max(20.0));
         ui.label(RichText::new("Run your agents side by side").font(bold(22.0)));
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new("Each agent is a real Claude Code or OpenCode terminal. Run several at once, watch them in a grid, and track what they cost.")
-                .color(MUTED),
-        );
-        ui.add_space(14.0);
-        if ui.add(primary_button("+  Create your first agent")).clicked() {
-            actions.push(Action::NewAgent);
-        }
+        ui.add_space(2.0);
+        ui.label(RichText::new("Pick an app to open your first agent's terminal.").color(MUTED));
+        ui.add_space(16.0);
+        ui.allocate_ui(Vec2::new(300.0, 0.0), |ui| {
+            if let Some(p) = new_agent_menu(ui, folder) {
+                actions.push(Action::Create(p));
+            }
+        });
     });
+}
+
+/// The "new agent" picker: one row per app (icon + name). Clicking a row
+/// creates the agent and opens its terminal straight away.
+fn new_agent_menu(ui: &mut egui::Ui, folder: &mut String) -> Option<Provider> {
+    ui.set_width(300.0);
+    let folder_ok = folder.trim().is_empty() || std::path::Path::new(folder.trim()).is_dir();
+    let mut picked = None;
+    for p in Provider::ALL {
+        let sub = match p {
+            Provider::Claude => "Anthropic's coding agent",
+            Provider::OpenCode => "Open-source coding agent",
+        };
+        if app_row(ui, p, sub, folder_ok).clicked() && folder_ok {
+            picked = Some(p);
+        }
+    }
+    ui.add_space(4.0);
+    ui.separator();
+    ui.label(RichText::new("Opens in").small().color(MUTED));
+    ui.add(
+        egui::TextEdit::singleline(folder)
+            .hint_text("home folder")
+            .desired_width(f32::INFINITY)
+            .margin(Margin::symmetric(8, 5)),
+    );
+    if !folder_ok {
+        ui.label(RichText::new("Folder not found").small().color(RED));
+    }
+    picked
+}
+
+fn app_row(ui: &mut egui::Ui, p: Provider, sub: &str, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click());
+    let painter = ui.painter();
+    if resp.hovered() && enabled {
+        painter.rect_filled(rect, 8.0, HOVER);
+    }
+    let icon = egui::Rect::from_min_size(rect.min + Vec2::new(8.0, 8.0), Vec2::splat(30.0));
+    draw_app_icon(painter, icon, p);
+    let x = icon.right() + 12.0;
+    let name_color = if enabled { TEXT } else { FAINT };
+    painter.text(egui::pos2(x, rect.top() + 7.0), egui::Align2::LEFT_TOP, p.label(), bold(14.0), name_color);
+    painter.text(egui::pos2(x, rect.top() + 26.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(11.5), MUTED);
+    if resp.hovered() && enabled {
+        painter.text(
+            egui::pos2(rect.right() - 10.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "Open ›",
+            egui::FontId::proportional(12.0),
+            p.color(),
+        );
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// App icon as a vector tile: Claude's orange spark, OpenCode's square "o".
+fn draw_app_icon(painter: &egui::Painter, rect: egui::Rect, p: Provider) {
+    let w = rect.width();
+    let c = rect.center();
+    match p {
+        Provider::Claude => {
+            painter.rect_filled(rect, w * 0.24, CLAUDE);
+            let stroke = Stroke::new((w * 0.085).max(1.5), Color32::from_rgb(0xFF, 0xF4, 0xEE));
+            for i in 0..10 {
+                let a = i as f32 / 10.0 * std::f32::consts::TAU;
+                let dir = Vec2::new(a.cos(), a.sin());
+                let len = if i % 2 == 0 { 0.34 } else { 0.27 };
+                painter.line_segment([c + dir * (w * 0.07), c + dir * (w * len)], stroke);
+            }
+        }
+        Provider::OpenCode => {
+            painter.rect_filled(rect, w * 0.24, Color32::from_rgb(0x1A, 0x1C, 0x22));
+            painter.rect_stroke(rect, w * 0.24, Stroke::new(1.0_f32, Color32::from_rgb(0x3A, 0x3F, 0x4C)), egui::StrokeKind::Inside);
+            let o = egui::Rect::from_center_size(c, Vec2::splat(w * 0.44));
+            painter.rect_stroke(o, 0.0, Stroke::new((w * 0.1).max(1.5), Color32::WHITE), egui::StrokeKind::Inside);
+            let inner = egui::Rect::from_min_max(egui::pos2(o.left(), o.center().y), o.max).shrink(w * 0.1);
+            painter.rect_filled(inner, 0.0, Color32::from_gray(0x8A));
+        }
+    }
+}
+
+fn app_icon(ui: &mut egui::Ui, p: Provider, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    draw_app_icon(ui.painter(), rect, p);
 }
 
 fn fmt_tokens(n: u64) -> String {

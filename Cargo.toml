@@ -1,8 +1,8 @@
 [package]
-name = "agent-hub"
+name = "kennel"
 version = "0.1.0"
 edition = "2021"
-description = "Run and track many AI coding agents (Claude Code, OpenCode) side by side"
+description = "Kennel: run Claude Code and OpenCode agents side by side in real terminals"
 
 [dependencies]
 alacritty_terminal = "0.25"

@@ -264,7 +264,7 @@ fn window_size(s: Size, cw: f32, ch: f32) -> WindowSize {
     }
 }
 
-/// If Agent Hub itself was started from inside a Claude Code session, these
+/// If Kennel itself was started from inside a Claude Code session, these
 /// variables would make every agent think it is a nested child session (which,
 /// among other things, turns off transcript saving and breaks resume).
 /// Children inherit our environment, so remove them from it once at startup.

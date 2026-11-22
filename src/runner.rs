@@ -256,7 +256,7 @@ pub fn live_file(agent_id: u64) -> PathBuf {
     data_dir().join("live").join(format!("{agent_id}.json"))
 }
 
-/// `agent-hub --statusline <id>`: Claude pipes its status JSON to us; we save it
+/// `kennel --statusline <id>`: Claude pipes its status JSON to us; we save it
 /// for the app and print a short status line back for Claude to show.
 pub fn statusline_main(agent_id: &str) {
     use std::io::Write;
@@ -275,7 +275,7 @@ pub fn statusline_main(agent_id: &str) {
     let v: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
     let model = v["model"]["display_name"].as_str().unwrap_or("");
     let cost = v["cost"]["total_cost_usd"].as_f64().unwrap_or(0.0);
-    let _ = write!(std::io::stdout(), "\x1b[2m{model} · ${cost:.3} · Agent Hub\x1b[0m");
+    let _ = write!(std::io::stdout(), "\x1b[2m{model} · ${cost:.3} · Kennel\x1b[0m");
 }
 
 // ---------- usage tracking ----------

@@ -14,14 +14,14 @@ fn app_exe() -> PathBuf {
     let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
     let p = ["debug", "release"]
         .iter()
-        .map(|d| target.join(d).join("agent-hub.exe"))
+        .map(|d| target.join(d).join("kennel.exe"))
         .find(|p| p.is_file())
         .expect("run `cargo build` before the live tests");
     p
 }
 
 fn work_dir() -> PathBuf {
-    let d = std::env::temp_dir().join("agent-hub-live");
+    let d = std::env::temp_dir().join("kennel-live");
     std::fs::create_dir_all(&d).unwrap();
     d
 }

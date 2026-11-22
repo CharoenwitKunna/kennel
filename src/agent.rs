@@ -193,7 +193,13 @@ pub fn data_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("AgentHub")
+    let dir = base.join("Kennel");
+    // One-time move from the app's previous name.
+    let old = base.join("AgentHub");
+    if !dir.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    dir
 }
 
 pub fn data_file() -> PathBuf {

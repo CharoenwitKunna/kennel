@@ -1,4 +1,5 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// GUI app: never open a console window (dev builds included).
+#![windows_subsystem = "windows"]
 
 mod agent;
 mod runner;
@@ -28,14 +29,14 @@ fn main() -> eframe::Result {
     term::scrub_parent_session_env();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Agent Hub")
+            .with_title("Kennel")
             .with_inner_size([1040.0, 620.0])
             .with_min_inner_size([720.0, 440.0]),
         renderer: eframe::Renderer::Glow,
         vsync: true,
         ..Default::default()
     };
-    eframe::run_native("Agent Hub", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native("Kennel", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
 
 // ---------- runtime state ----------
@@ -185,7 +186,7 @@ impl App {
             bg_rx,
             dirty: false,
             last_save: Instant::now(),
-            self_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-hub.exe")),
+            self_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kennel.exe")),
             mem: (Instant::now() - Duration::from_secs(10), None),
             focus_term: None,
             autostarted: false,
@@ -409,7 +410,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     logo(ui);
-                    ui.label(RichText::new("Agent Hub").font(bold(16.0)));
+                    ui.label(RichText::new("Kennel").font(bold(16.0)));
                     ui.add_space(18.0);
                     segmented(ui, &mut self.view);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

@@ -1,4 +1,4 @@
-# Agent Hub
+# Kennel
 
 A small Rust desktop app for running several AI coding agents side by side. Each agent is a
 **real interactive terminal** running the actual Claude Code or OpenCode TUI. The app tracks each
@@ -16,18 +16,18 @@ agent's tokens and cost.
   - OpenCode: read from `opencode session export`.
 - **Status:** each agent shows Working, Ready or Exited, and an amber dot marks an agent that
   finished while you were looking at another one.
-- **Storage:** agents and totals are kept in `%APPDATA%\AgentHub\state.json`. No API keys are
+- **Storage:** agents and totals are kept in `%APPDATA%\Kennel\state.json`. No API keys are
   stored; each CLI uses its own login.
 
 ## Download
 
-Every push to `main` builds `agent-hub.exe` on GitHub Actions. It's under
+Every push to `main` builds `kennel.exe` on GitHub Actions. It's under
 *Actions → latest run → Artifacts*, and on the Releases page for `v*` tags.
 
 ## Build locally
 
 ```powershell
-cargo build --release          # target\release\agent-hub.exe
+cargo build --release          # target\release\kennel.exe
 cargo test                     # unit tests (fast)
 cargo build; cargo live        # live end-to-end tests against your logged-in CLIs
 ```
@@ -45,7 +45,7 @@ logged in, and they use a little real usage.
 
 ## Notes
 
-- An OpenCode agent that has a model set runs with `--standalone`. The shared OpenCode
-  background service ignores per-launch config, so a private server is the only way to apply it.
-- Claude's status line is pointed at `agent-hub.exe --statusline <id>`. That small helper records
+- OpenCode uses the model you last picked inside it with `/models`. Per-launch config only
+  reaches a `--standalone` server, which has no login, so Kennel leaves the model to OpenCode.
+- Claude's status line is pointed at `kennel.exe --statusline <id>`. That small helper records
   the cost and prints a one-line footer inside Claude's TUI.

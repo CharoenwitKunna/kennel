@@ -1,0 +1,204 @@
+//! Live end-to-end tests: real CLIs in a real PTY, no window.
+//! Run with `cargo test --release -- --ignored --nocapture --test-threads=1`.
+
+use crate::agent::{Agent, Provider, Settings};
+use crate::runner::{self, ClaudeTracker};
+use crate::term::TermSession;
+use eframe::egui;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+fn app_exe() -> PathBuf {
+    // The app binary doubles as Claude's status-line helper. Use the debug build
+    // (`cargo build && cargo live`), falling back to a release build.
+    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+    let p = ["debug", "release"]
+        .iter()
+        .map(|d| target.join(d).join("agent-hub.exe"))
+        .find(|p| p.is_file())
+        .expect("run `cargo build` before the live tests");
+    p
+}
+
+fn work_dir() -> PathBuf {
+    let d = std::env::temp_dir().join("agent-hub-live");
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn wait_for(sess: &TermSession, what: &[&str], secs: u64) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        let s = sess.screen_text();
+        if let Some(hit) = what.iter().find(|w| s.contains(*w)) {
+            return Some(hit.to_string());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
+fn dump(label: &str, sess: &TermSession) {
+    println!("----- {label} -----");
+    for line in sess.screen_text().lines() {
+        let l = line.trim_end();
+        if !l.is_empty() {
+            println!("|{l}");
+        }
+    }
+}
+
+fn wait_quiet(sess: &TermSession, quiet_ms: u64, max_secs: u64) {
+    let deadline = Instant::now() + Duration::from_secs(max_secs);
+    while Instant::now() < deadline {
+        if sess.quiet_for().is_some_and(|d| d > Duration::from_millis(quiet_ms)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+#[ignore]
+fn live_claude_terminal() {
+    let mut agent = Agent::new(9001, "live-claude".into(), Provider::Claude);
+    agent.model = "haiku".into();
+    agent.cwd = work_dir().to_string_lossy().into();
+    let settings = Settings::default();
+    let ctx = egui::Context::default();
+    crate::term::scrub_parent_session_env();
+
+    let launch = runner::launch(&agent, &settings, &app_exe()).unwrap();
+    println!("args: {:?}", launch.spec.args);
+    assert!(!launch.resumed);
+    let mut launch = launch;
+    let dbg = work_dir().join("claude-debug.log");
+    let _ = std::fs::remove_file(&dbg);
+    launch.spec.args.extend(["--debug-file".into(), dbg.to_string_lossy().into()]);
+    let sid = launch.session_id.clone();
+    let sess = TermSession::spawn(launch.spec, 110, 36, ctx.clone()).unwrap();
+    let mut tracker = ClaudeTracker::new(agent.id, &sid);
+
+    let hit = wait_for(&sess, &["trust", "Trust", "? for shortcuts", "for shortcuts", ">"], 40);
+    dump("startup", &sess);
+    if matches!(hit.as_deref(), Some("trust") | Some("Trust")) {
+        // Default is "No, exit": move down to "Yes, I trust this folder".
+        wait_quiet(&sess, 1000, 10);
+        sess.write(b"\x1b[B".to_vec());
+        std::thread::sleep(Duration::from_millis(400));
+        sess.write(b"\r".to_vec());
+        std::thread::sleep(Duration::from_secs(3));
+        dump("after trust", &sess);
+    }
+    wait_quiet(&sess, 1000, 10);
+    if sess.screen_text().contains("MCP server") {
+        // Default choice: continue without the project's MCP server.
+        sess.write(b"\r".to_vec());
+        wait_for(&sess, &["for shortcuts", "Try \""], 20);
+        wait_quiet(&sess, 1000, 10);
+    }
+    sess.submit("Reply with the word PONG spelled backwards, nothing else.");
+    let got = wait_for(&sess, &["GNOP", "rror"], 60);
+    wait_quiet(&sess, 1000, 10);
+    dump("after prompt", &sess);
+    assert_eq!(got.as_deref(), Some("GNOP"), "no reply on screen");
+
+    std::thread::sleep(Duration::from_secs(2));
+    let u = tracker.poll();
+    println!("usage: {u:?}");
+    let live = std::fs::read_to_string(runner::live_file(agent.id)).unwrap_or_default();
+    println!("statusline json: {}", &live[..live.len().min(1500)]);
+    assert!(u.output > 0, "no tokens read from transcript");
+    assert!(u.cost_usd > 0.0, "no cost from status line");
+    sess.kill();
+    drop(sess);
+
+    // Resume: same session, `--resume` this time.
+    agent.session_id = Some(sid.clone());
+    agent.session_usage = u;
+    let launch = runner::launch(&agent, &settings, &app_exe()).unwrap();
+    assert!(launch.resumed, "expected --resume");
+    let sess = TermSession::spawn(launch.spec, 110, 36, ctx).unwrap();
+    let mut tracker = ClaudeTracker::new(agent.id, &sid);
+    wait_for(&sess, &["\u{276f}"], 20); // Claude's "❯" prompt
+    wait_quiet(&sess, 1000, 10);
+    let live0 = std::fs::read_to_string(runner::live_file(agent.id)).unwrap_or_default();
+    let v0: serde_json::Value = serde_json::from_str(&live0).unwrap_or_default();
+    println!("status-line cost right after resume (before any prompt): {:?}", v0["cost"]["total_cost_usd"]);
+    sess.submit("Now reply with the word ZIP spelled backwards, nothing else.");
+    let got = wait_for(&sess, &["PIZ", "rror"], 60);
+    wait_quiet(&sess, 1000, 10);
+    dump("after resume prompt", &sess);
+    std::thread::sleep(Duration::from_secs(2));
+    let u2 = tracker.poll();
+    println!("usage after resume: {u2:?}");
+    let live = std::fs::read_to_string(runner::live_file(agent.id)).unwrap_or_default();
+    println!("statusline json after resume: {}", &live[..live.len().min(600)]);
+    assert_eq!(got.as_deref(), Some("PIZ"));
+    assert!(u2.output > u.output, "resumed tokens should accumulate");
+    assert!(u2.cost_usd > u.cost_usd, "resumed cost should accumulate");
+    sess.kill();
+}
+
+#[test]
+#[ignore]
+fn live_opencode_terminal() {
+    let mut agent = Agent::new(9002, "live-opencode".into(), Provider::OpenCode);
+    agent.model = "opencode/hy4-flash-free".into();
+    agent.cwd = work_dir().to_string_lossy().into();
+    let settings = Settings::default();
+    let ctx = egui::Context::default();
+
+    let launch = runner::launch(&agent, &settings, &app_exe()).unwrap();
+    println!("args: {:?} env: {:?}", launch.spec.args, launch.spec.env);
+    let sid = launch.session_id.clone();
+    let exe = launch.spec.program.clone();
+    let sess = TermSession::spawn(launch.spec, 110, 36, ctx).unwrap();
+    wait_for(&sess, &["Ask anything"], 20);
+    wait_quiet(&sess, 1000, 10);
+    dump("startup", &sess);
+    sess.submit("Reply with the word PONG spelled backwards, nothing else.");
+    let got = wait_for(&sess, &["GNOP", "free messages", "rror", "Credits"], 60);
+    wait_quiet(&sess, 1000, 10);
+    dump("after prompt", &sess);
+    println!("reply check: {got:?}");
+    assert!(got.is_some(), "prompt got no visible response at all");
+
+    // Our pre-chosen session id must be the one OpenCode used.
+    let u = runner::opencode_session_usage(&exe, &sid, Some(&work_dir()));
+    println!("session {sid} usage: {u:?}");
+    let u = u.expect("export of our chosen session id failed");
+    if got.as_deref() == Some("GNOP") {
+        assert!(u.total_tokens() > 0);
+    }
+    let quiet = sess.quiet_for();
+    println!("quiet for (should keep growing when idle): {quiet:?}");
+    std::thread::sleep(Duration::from_secs(3));
+    println!("quiet for after 3s: {:?}", sess.quiet_for());
+    sess.kill();
+    agent.session_id = Some(sid);
+}
+
+#[test]
+#[ignore]
+fn live_key_probe() {
+    use crate::term::SpawnSpec;
+    let script = "$i=0; while($i -lt 4){ $k=[Console]::ReadKey($true); Write-Host (\"KEY=\" + $k.Key + \" CH=\" + [int]$k.KeyChar); $i++ }; Start-Sleep 2";
+    let spec = SpawnSpec {
+        program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+        args: vec!["-NoProfile".into(), "-Command".into(), script.into()],
+        cwd: None,
+        env: Default::default(),
+    };
+    let sess = TermSession::spawn(spec, 100, 20, egui::Context::default()).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    sess.write(b"\x1b[B".to_vec());
+    std::thread::sleep(Duration::from_millis(500));
+    sess.write(b"\x1b[A".to_vec());
+    std::thread::sleep(Duration::from_millis(500));
+    sess.write(b"\r".to_vec());
+    std::thread::sleep(Duration::from_millis(500));
+    sess.write(b"x".to_vec());
+    std::thread::sleep(Duration::from_secs(2));
+    dump("keys", &sess);
+}

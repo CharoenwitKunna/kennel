@@ -1,0 +1,28 @@
+[package]
+name = "agent-hub"
+version = "0.1.0"
+edition = "2021"
+description = "Run and track many AI coding agents (Claude Code, OpenCode) side by side"
+
+[dependencies]
+alacritty_terminal = "0.25"
+# glow (OpenGL) renderer instead of wgpu, no accesskit: keeps RSS and binary small
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Dev/test builds: our code builds incrementally in seconds, while dependencies
+# (egui, alacritty) are optimized once and cached so terminals render fast.
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Thin LTO: nearly the same speed/size as fat LTO, several times faster to build.
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+panic = "abort"

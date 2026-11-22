@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to attach the exe to a GitHub Release on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Caches ~/.cargo and target/ so dependency builds happen once, not every run.
+      - uses: Swatinem/rust-cache@v2
+
+      # Unit tests only. Live tests (#[ignore]) drive real logged-in Claude Code /
+      # OpenCode CLIs and are run locally with `cargo build && cargo live`.
+      - name: Unit tests
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-hub-windows
+          path: target/release/agent-hub.exe
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/agent-hub.exe

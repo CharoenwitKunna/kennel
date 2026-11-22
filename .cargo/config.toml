@@ -1,0 +1,8 @@
+# windows-gnu only: link with Rust's bundled MinGW instead of whatever gcc is
+# first on PATH (some standalone MinGW installs lack libgcc_eh). No effect on MSVC.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]
+
+[alias]
+# `cargo live`: end-to-end tests against the real CLIs (debug build, all in parallel).
+live = "test -- --ignored --nocapture --test-threads=4"

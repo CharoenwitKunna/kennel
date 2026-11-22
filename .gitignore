@@ -1,0 +1,5 @@
+/target
+*.log
+# Local agent state written by OpenCode/Claude when run inside this folder
+.opencode/
+.claude/

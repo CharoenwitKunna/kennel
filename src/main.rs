@@ -147,6 +147,8 @@ struct App {
     renaming: Option<(u64, String)>,
     /// Focus the rename box on its first frame.
     rename_focus: bool,
+    /// Sidebar card being dragged to a new position.
+    dragging: Option<u64>,
     bg_tx: Sender<Bg>,
     bg_rx: Receiver<Bg>,
     dirty: bool,
@@ -186,6 +188,7 @@ impl App {
             confirm_delete: None,
             renaming: None,
             rename_focus: false,
+            dragging: None,
             bg_tx,
             bg_rx,
             dirty: false,
@@ -524,12 +527,18 @@ impl App {
 
                 let agents = self.state.agents.clone();
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let mut rects = Vec::with_capacity(agents.len());
                     for a in &agents {
                         let status = self.status(a.id);
                         let selected = self.selected == Some(a.id);
                         let attention = self.attention.contains(&a.id);
-                        let Some(resp) = self.agent_card(ui, a, status, selected, attention) else { continue };
+                        let (rect, resp) = self.agent_card(ui, a, status, selected, attention);
+                        rects.push((a.id, rect));
+                        let Some(resp) = resp else { continue };
+                        if resp.drag_started() {
+                            self.dragging = Some(a.id);
+                        }
                         if resp.clicked() {
                             self.actions.push(Action::Select(a.id));
                         }
@@ -570,53 +579,90 @@ impl App {
                             }
                         });
                     }
+                    self.drag_reorder(ui, &rects);
                 });
             });
     }
 
-    /// Compact sidebar card. Returns None while the card is being renamed
-    /// (the text box then owns the clicks).
-    fn agent_card(&mut self, ui: &mut egui::Ui, a: &Agent, status: Status, selected: bool, attention: bool) -> Option<egui::Response> {
+    /// One-row sidebar card: icon, name, status, cost. Returns its rect, and
+    /// its response unless it is being renamed (the text box owns input then).
+    fn agent_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        a: &Agent,
+        status: Status,
+        selected: bool,
+        attention: bool,
+    ) -> (egui::Rect, Option<egui::Response>) {
         let renaming = self.renaming.as_ref().is_some_and(|(id, _)| *id == a.id);
         let inner = egui::Frame::new()
             .fill(if selected { RAISED } else { PANEL })
             .stroke(Stroke::new(1.0_f32, if selected { Color32::from_rgb(0x34, 0x3B, 0x50) } else { Color32::TRANSPARENT }))
-            .corner_radius(8)
-            .inner_margin(Margin::symmetric(8, 6))
+            .corner_radius(6)
+            .inner_margin(Margin::symmetric(7, 4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 2.0;
                 ui.horizontal(|ui| {
+                    ui.set_height(20.0);
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    app_icon(ui, a.provider, 16.0);
+                    app_icon(ui, a.provider, 15.0);
                     if renaming {
-                        self.rename_box(ui, a.id, 13.5, ui.available_width() - 4.0);
-                    } else {
-                        ui.add(egui::Label::new(RichText::new(&a.name).font(bold(13.5))).truncate().selectable(false));
+                        self.rename_box(ui, a.id, 13.0, ui.available_width() - 2.0);
+                        return;
                     }
-                    if attention {
-                        let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
-                        ui.painter().circle_filled(r.center(), 3.5, AMBER);
-                    }
-                });
-                // Keep this row while renaming so the card keeps its size.
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    status_indicator(ui, status);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(format!("${:.3}", a.total_usage().cost_usd)).small().color(MUTED));
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new(format!("${:.2}", a.total_usage().cost_usd)).small().color(FAINT));
+                        status_indicator(ui, status, false);
+                        if attention {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 3.0, AMBER);
+                        }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.add(egui::Label::new(RichText::new(&a.name).font(bold(13.0))).truncate().selectable(false));
+                        });
                     });
                 });
             });
-        if renaming {
-            return None;
-        }
         let rect = inner.response.rect;
-        let resp = ui.interact(rect, egui::Id::new(("card", a.id)), Sense::click());
-        if resp.hovered() && !selected {
-            ui.painter().rect_filled(rect, 8.0, Color32::from_white_alpha(6));
+        if renaming {
+            return (rect, None);
         }
-        Some(resp.on_hover_text("Double-click to rename"))
+        let resp = ui.interact(rect, egui::Id::new(("card", a.id)), Sense::click_and_drag());
+        if self.dragging == Some(a.id) {
+            ui.painter().rect_filled(rect, 6.0, Color32::from_black_alpha(110));
+        } else if resp.hovered() && !selected && self.dragging.is_none() {
+            ui.painter().rect_filled(rect, 6.0, Color32::from_white_alpha(6));
+        }
+        let resp = if self.dragging.is_none() { resp.on_hover_text("Double-click to rename · drag to reorder") } else { resp };
+        (rect, Some(resp))
+    }
+
+    /// While a card is dragged: show where it will land, and move it on release.
+    fn drag_reorder(&mut self, ui: &mut egui::Ui, rects: &[(u64, egui::Rect)]) {
+        let Some(drag_id) = self.dragging else { return };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let (pos, released) = ui.input(|i| (i.pointer.interact_pos(), !i.pointer.primary_down()));
+        let (Some(pos), Some(last)) = (pos, rects.last()) else {
+            self.dragging = None;
+            return;
+        };
+        // Slot = how many cards sit above the pointer.
+        let target = rects.iter().position(|(_, r)| pos.y < r.center().y).unwrap_or(rects.len());
+        let y = if target < rects.len() { rects[target].1.top() - 2.0 } else { last.1.bottom() + 2.0 };
+        let x = last.1.x_range();
+        ui.painter().hline(x, y, Stroke::new(2.0_f32, ACCENT));
+        if released {
+            self.dragging = None;
+            if let Some(from) = self.state.agents.iter().position(|a| a.id == drag_id) {
+                let to = if from < target { target - 1 } else { target };
+                if to != from {
+                    let a = self.state.agents.remove(from);
+                    self.state.agents.insert(to.min(self.state.agents.len()), a);
+                    self.dirty = true;
+                }
+            }
+        }
     }
 
     fn central(&mut self, ctx: &egui::Context) {
@@ -692,7 +738,7 @@ impl App {
                     ui.add_space(4.0);
                     app_icon(ui, a.provider, 16.0);
                     self.name_widget(ui, &a, 13.5);
-                    status_indicator(ui, status);
+                    status_indicator(ui, status, true);
                     let u = a.session_usage;
                     ui.label(
                         RichText::new(format!("${:.4} · {} tok", u.cost_usd, fmt_tokens(u.total_tokens()))).small().color(FAINT),
@@ -1311,34 +1357,39 @@ fn icon_button(text: &str) -> Btn {
     Btn { text: text.into(), kind: BtnKind::Icon }
 }
 
-/// Status as a dot + label, or an animated wave while the agent is working.
-fn status_indicator(ui: &mut egui::Ui, s: Status) {
+/// Status as a dot (plus label if `label`), or a small pulse while working.
+fn status_indicator(ui: &mut egui::Ui, s: Status, label: bool) {
     if s == Status::Working {
-        working_wave(ui);
-    } else {
-        status_dot(ui, s);
+        working_pulse(ui);
+        return;
+    }
+    let dot = status_dot(ui, s);
+    if label {
         ui.label(RichText::new(s.label()).small().color(s.color()));
+    } else {
+        dot.on_hover_text(s.label());
     }
 }
 
-/// Three dots rising and falling in a wave.
-fn working_wave(ui: &mut egui::Ui) {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 14.0), Sense::hover());
+/// Three tiny dots pulsing in sequence.
+fn working_pulse(ui: &mut egui::Ui) {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(15.0, 8.0), Sense::hover());
     let t = ui.input(|i| i.time) as f32;
     let painter = ui.painter();
     for i in 0..3 {
-        let k = ((t * 6.0 - i as f32 * 0.9).sin() + 1.0) / 2.0; // 0..1
-        let center = egui::pos2(rect.left() + 5.0 + i as f32 * 9.0, rect.center().y + 2.0 - k * 4.0);
-        painter.circle_filled(center, 2.3 + k * 0.7, GREEN.gamma_multiply(0.4 + 0.6 * k));
+        let k = ((t * 5.0 - i as f32 * 0.8).sin() + 1.0) / 2.0; // 0..1
+        let center = egui::pos2(rect.left() + 2.5 + i as f32 * 5.0, rect.center().y - k);
+        painter.circle_filled(center, 1.6, GREEN.gamma_multiply(0.3 + 0.7 * k));
     }
     resp.on_hover_text("Working");
     // ~30 fps, and only while something is working.
     ui.ctx().request_repaint_after(Duration::from_millis(33));
 }
 
-fn status_dot(ui: &mut egui::Ui, s: Status) {
-    let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
-    ui.painter().circle_filled(r.center(), 3.5, s.color());
+fn status_dot(ui: &mut egui::Ui, s: Status) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
+    ui.painter().circle_filled(r.center(), 3.0, s.color());
+    resp
 }
 
 

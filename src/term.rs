@@ -172,6 +172,7 @@ impl TermSession {
         }
     }
 
+    #[cfg(test)] // used by the live tests
     /// Paste `text` and press Enter a moment later, so TUIs see a separate keypress.
     pub fn submit(&self, text: &str) {
         self.paste(text);

@@ -10,7 +10,7 @@ mod theme;
 mod live_tests;
 
 use agent::{Agent, Permission, Provider, State, Usage};
-use eframe::egui::{self, Align, Color32, CornerRadius, Key, Layout, Margin, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align, Color32, Key, Layout, Margin, RichText, Sense, Stroke, Vec2};
 use runner::ClaudeTracker;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -87,7 +87,7 @@ const QUIET: Duration = Duration::from_millis(1500);
 struct Live {
     sess: TermSession,
     was_working: bool,
-    /// The user has typed into or broadcast to this agent (gates "needs you").
+    /// The user has typed into this agent (gates "needs you").
     interacted: bool,
     claude: Option<ClaudeTracker>,
     last_poll: Instant,
@@ -146,8 +146,10 @@ struct App {
     editor: Option<(Option<u64>, Draft)>,
     show_settings: bool,
     confirm_delete: Option<u64>,
-    broadcast: String,
-    broadcast_off: HashSet<u64>,
+    /// Agent being renamed inline, with the text typed so far.
+    renaming: Option<(u64, String)>,
+    /// Focus the rename box on its first frame.
+    rename_focus: bool,
     bg_tx: Sender<Bg>,
     bg_rx: Receiver<Bg>,
     dirty: bool,
@@ -185,8 +187,8 @@ impl App {
             editor: None,
             show_settings: false,
             confirm_delete: None,
-            broadcast: String::new(),
-            broadcast_off: HashSet::new(),
+            renaming: None,
+            rename_focus: false,
             bg_tx,
             bg_rx,
             dirty: false,
@@ -437,8 +439,8 @@ impl App {
 
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
-            .exact_height(52.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 0)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .exact_height(40.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 0)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     logo(ui);
@@ -490,65 +492,57 @@ impl App {
     fn sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("sidebar")
             .resizable(true)
-            .default_width(272.0)
-            .width_range(220.0..=420.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(12)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .default_width(210.0)
+            .width_range(170.0..=360.0)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(8)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("AGENTS").small().color(MUTED).strong());
-                    ui.label(RichText::new(self.state.agents.len().to_string()).small().color(FAINT));
-                });
-                ui.add_space(4.0);
-
-                // Totals card pinned at the bottom.
-                egui::TopBottomPanel::bottom("totals").frame(egui::Frame::new().inner_margin(Margin::symmetric(0, 8))).show_inside(
+                // Total spend, pinned at the bottom, one line.
+                egui::TopBottomPanel::bottom("totals").frame(egui::Frame::new().inner_margin(Margin::symmetric(0, 4))).show_inside(
                     ui,
                     |ui| {
                         let u = self.state.total_usage();
-                        egui::Frame::new().fill(RAISED).corner_radius(10).inner_margin(Margin::same(12)).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new("TOTAL SPEND").small().color(MUTED).strong());
-                            ui.label(RichText::new(format!("${:.4}", u.cost_usd)).font(bold(22.0)));
-                            ui.label(
-                                RichText::new(format!(
-                                    "in {} · out {} · cache {}",
-                                    fmt_tokens(u.input),
-                                    fmt_tokens(u.output),
-                                    fmt_tokens(u.cache_read + u.cache_write)
-                                ))
-                                .small()
-                                .color(MUTED),
-                            );
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Total").small().color(MUTED));
+                            ui.label(RichText::new(format!("${:.4}", u.cost_usd)).font(bold(13.0)));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(format!("{} tok", fmt_tokens(u.total_tokens()))).small().color(FAINT));
+                            });
                         });
                     },
                 );
 
                 if self.state.agents.is_empty() {
-                    ui.add_space(20.0);
+                    ui.add_space(16.0);
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new("No agents yet").color(MUTED));
                         ui.add_space(6.0);
-                        if ui.add(primary_button("Create an agent")).clicked() {
+                        if ui.add(primary_button("New agent")).clicked() {
                             self.actions.push(Action::NewAgent);
                         }
                     });
                     return;
                 }
 
+                let agents = self.state.agents.clone();
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    for (i, a) in self.state.agents.iter().enumerate() {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for a in &agents {
                         let status = self.status(a.id);
                         let selected = self.selected == Some(a.id);
                         let attention = self.attention.contains(&a.id);
-                        let resp = agent_card(ui, a, status, selected, attention, i);
+                        let Some(resp) = self.agent_card(ui, a, status, selected, attention) else { continue };
                         if resp.clicked() {
                             self.actions.push(Action::Select(a.id));
                         }
-                        if resp.double_clicked() && !status.alive() {
-                            self.actions.push(Action::Start(a.id));
+                        if resp.double_clicked() {
+                            self.begin_rename(a.id);
                         }
                         resp.context_menu(|ui| {
-                            ui.set_min_width(170.0);
+                            ui.set_min_width(160.0);
+                            if ui.button("Rename").clicked() {
+                                self.begin_rename(a.id);
+                                ui.close_menu();
+                            }
                             if status.alive() {
                                 if ui.button("Restart").clicked() {
                                     self.actions.push(Action::Restart(a.id));
@@ -576,22 +570,65 @@ impl App {
                                 ui.close_menu();
                             }
                         });
-                        ui.add_space(6.0);
                     }
                 });
             });
     }
 
+    /// Compact sidebar card. Returns None while the card is being renamed
+    /// (the text box then owns the clicks).
+    fn agent_card(&mut self, ui: &mut egui::Ui, a: &Agent, status: Status, selected: bool, attention: bool) -> Option<egui::Response> {
+        let renaming = self.renaming.as_ref().is_some_and(|(id, _)| *id == a.id);
+        let inner = egui::Frame::new()
+            .fill(if selected { RAISED } else { PANEL })
+            .stroke(Stroke::new(1.0_f32, if selected { Color32::from_rgb(0x34, 0x3B, 0x50) } else { Color32::TRANSPARENT }))
+            .corner_radius(8)
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    app_icon(ui, a.provider, 16.0);
+                    if renaming {
+                        self.rename_box(ui, a.id, 13.5, ui.available_width() - 4.0);
+                    } else {
+                        ui.add(egui::Label::new(RichText::new(&a.name).font(bold(13.5))).truncate().selectable(false));
+                    }
+                    if attention {
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 3.5, AMBER);
+                    }
+                });
+                if !renaming {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        status_dot(ui, status);
+                        ui.label(RichText::new(status.label()).small().color(status.color()));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(format!("${:.3}", a.total_usage().cost_usd)).small().color(MUTED));
+                        });
+                    });
+                }
+            });
+        if renaming {
+            return None;
+        }
+        let rect = inner.response.rect;
+        let resp = ui.interact(rect, egui::Id::new(("card", a.id)), Sense::click());
+        if resp.hovered() && !selected {
+            ui.painter().rect_filled(rect, 8.0, Color32::from_white_alpha(6));
+        }
+        Some(resp.on_hover_text("Double-click to rename"))
+    }
+
     fn central(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(12)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(6)))
             .show(ctx, |ui| {
                 if self.state.agents.is_empty() {
                     empty_state(ui, &mut self.actions, &mut self.new_folder);
                     return;
-                }
-                if self.live.values().any(|l| l.sess.exited().is_none()) {
-                    self.broadcast_bar(ui);
                 }
                 match self.view {
                     View::Focus => self.focus_view(ui),
@@ -600,83 +637,87 @@ impl App {
             });
     }
 
-    fn broadcast_bar(&mut self, ui: &mut egui::Ui) {
-        egui::TopBottomPanel::bottom("broadcast")
-            .frame(egui::Frame::new().inner_margin(Margin { left: 0, right: 0, top: 10, bottom: 0 }))
-            .show_inside(ui, |ui| {
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .stroke(Stroke::new(1.0_f32, BORDER))
-                    .corner_radius(10)
-                    .inner_margin(Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        let targets: Vec<(u64, String, Color32)> = self
-                            .state
-                            .agents
-                            .iter()
-                            .filter(|a| self.live.get(&a.id).is_some_and(|l| l.sess.exited().is_none()))
-                            .map(|a| (a.id, a.name.clone(), a.provider.color()))
-                            .collect();
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("📣").color(MUTED));
-                            for (id, name, color) in &targets {
-                                let on = !self.broadcast_off.contains(id);
-                                if chip(ui, name, *color, on).clicked() {
-                                    if on {
-                                        self.broadcast_off.insert(*id);
-                                    } else {
-                                        self.broadcast_off.remove(id);
-                                    }
-                                }
-                            }
-                            let n = targets.iter().filter(|(id, _, _)| !self.broadcast_off.contains(id)).count();
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let can = n > 0 && !self.broadcast.trim().is_empty();
-                                let send = ui.add_enabled(can, primary_button(&format!("Send to {n}"))).clicked();
-                                let edit = ui.add(
-                                    egui::TextEdit::singleline(&mut self.broadcast)
-                                        .hint_text("Broadcast a message to the selected running agents…")
-                                        .desired_width(f32::INFINITY)
-                                        .margin(Margin::symmetric(8, 5)),
-                                );
-                                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                                if (send || enter) && can {
-                                    let text = std::mem::take(&mut self.broadcast);
-                                    for (id, _, _) in &targets {
-                                        if !self.broadcast_off.contains(id) {
-                                            if let Some(l) = self.live.get_mut(id) {
-                                                l.sess.submit(text.trim());
-                                                l.interacted = true;
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        });
-                    });
-            });
-    }
-
     fn focus_view(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.selected.filter(|id| self.state.agent(*id).is_some()) else {
             ui.centered_and_justified(|ui| ui.label(RichText::new("Select an agent").color(MUTED)));
             return;
         };
-        let status = self.status(id);
-        let a = self.state.agent(id).unwrap().clone();
+        self.agent_pane(ui, id, false);
+    }
 
-        // Header card
-        egui::Frame::new().fill(PANEL).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(12).inner_margin(Margin::same(14)).show(
-            ui,
-            |ui| {
-                ui.set_width(ui.available_width());
+    fn grid_view(&mut self, ui: &mut egui::Ui) {
+        let ids: Vec<u64> = self.state.agents.iter().map(|a| a.id).filter(|id| self.live.contains_key(id)).collect();
+        if ids.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("No agents running. Start some from the sidebar, or use “Start all”.").color(MUTED));
+            });
+            return;
+        }
+        let n = ids.len();
+        let cols = (n as f32).sqrt().ceil() as usize;
+        let rows = n.div_ceil(cols);
+        let gap = 6.0;
+        let area = ui.available_rect_before_wrap();
+        let tile_w = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
+        let tile_h = (area.height() - gap * (rows as f32 - 1.0)) / rows as f32;
+        ui.allocate_rect(area, Sense::hover());
+        for (i, id) in ids.into_iter().enumerate() {
+            let (c, r) = (i % cols, i / cols);
+            let min = area.min + Vec2::new(c as f32 * (tile_w + gap), r as f32 * (tile_h + gap));
+            let rect = egui::Rect::from_min_size(min, Vec2::new(tile_w, tile_h));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+            self.agent_pane(&mut child, id, true);
+        }
+    }
+
+    /// One agent: a slim title row on top of its terminal. Used by both views.
+    fn agent_pane(&mut self, ui: &mut egui::Ui, id: u64, in_grid: bool) {
+        let Some(a) = self.state.agent(id).cloned() else { return };
+        let status = self.status(id);
+        let focused = ui.memory(|m| m.has_focus(term_id(id)));
+        let border = if focused {
+            a.provider.color().gamma_multiply(0.85)
+        } else if self.attention.contains(&id) {
+            AMBER.gamma_multiply(0.7)
+        } else {
+            BORDER
+        };
+        egui::Frame::new()
+            .fill(PANEL)
+            .stroke(Stroke::new(1.0_f32, border))
+            .corner_radius(8)
+            .inner_margin(Margin::same(3))
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
                 ui.horizontal(|ui| {
-                    app_icon(ui, a.provider, 26.0);
-                    ui.label(RichText::new(&a.name).font(bold(19.0)));
-                    status_pill(ui, status);
+                    ui.set_height(26.0);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_space(4.0);
+                    app_icon(ui, a.provider, 16.0);
+                    self.name_widget(ui, &a, 13.5);
+                    status_dot(ui, status);
+                    ui.label(RichText::new(status.label()).small().color(status.color()));
+                    let u = a.session_usage;
+                    ui.label(
+                        RichText::new(format!("${:.4} · {} tok", u.cost_usd, fmt_tokens(u.total_tokens()))).small().color(FAINT),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.menu_button(RichText::new("⋯").size(16.0), |ui| {
-                            ui.set_min_width(170.0);
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let more = ui.add(icon_button("⋯")).on_hover_text("More");
+                        let menu_id = egui::Id::new(("pane_menu", id));
+                        if more.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(menu_id));
+                        }
+                        egui::popup_below_widget(ui, menu_id, &more, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                            ui.set_min_width(160.0);
+                            if ui.button("Rename").clicked() {
+                                self.begin_rename(id);
+                                ui.close_menu();
+                            }
+                            if ui.button("Edit…").clicked() {
+                                self.actions.push(Action::Edit(id));
+                                ui.close_menu();
+                            }
                             if ui.button("New session").clicked() {
                                 self.actions.push(Action::NewSession(id));
                                 ui.close_menu();
@@ -693,118 +734,74 @@ impl App {
                                 ui.close_menu();
                             }
                         });
-                        if ui.add(ghost_button("Edit")).clicked() {
-                            self.actions.push(Action::Edit(id));
+                        if in_grid && ui.add(icon_button("⤢")).on_hover_text("Open in focus view").clicked() {
+                            self.actions.push(Action::OpenFocus(id));
                         }
                         if status.alive() {
-                            if ui.add(danger_button("■  Stop")).clicked() {
+                            if ui.add(icon_button("■")).on_hover_text("Stop").clicked() {
                                 self.actions.push(Action::Stop(id));
                             }
-                            if ui.add(ghost_button("↻  Restart")).clicked() {
+                            if ui.add(icon_button("↻")).on_hover_text("Restart").clicked() {
                                 self.actions.push(Action::Restart(id));
                             }
                         } else {
-                            let label = if a.session_id.is_some() { "▶  Resume" } else { "▶  Start" };
-                            if ui.add(primary_button(label)).clicked() {
+                            let tip = if a.session_id.is_some() { "Resume" } else { "Start" };
+                            if ui.add(icon_button("▶")).on_hover_text(tip).clicked() {
                                 self.actions.push(Action::Start(id));
                             }
                         }
                     });
                 });
-                ui.add_space(8.0);
-                let s = a.session_usage;
-                let t = a.total_usage();
-                ui.horizontal_wrapped(|ui| {
-                    stat(ui, "Session", &format!("${:.4}", s.cost_usd));
-                    stat(ui, "In", &fmt_tokens(s.input));
-                    stat(ui, "Out", &fmt_tokens(s.output));
-                    stat(ui, "Cache", &fmt_tokens(s.cache_read + s.cache_write));
-                    stat(ui, "All time", &format!("${:.4}", t.cost_usd));
-                    stat(ui, "Runs", &a.runs.to_string());
+                egui::Frame::new().fill(TERM_BG).corner_radius(6).inner_margin(Margin::same(2)).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    self.terminal_or_placeholder(ui, id, status, &a);
                 });
-            },
-        );
-        ui.add_space(10.0);
-
-        let focused = ui.memory(|m| m.has_focus(term_id(id)));
-        let border = if focused { a.provider.color().gamma_multiply(0.8) } else { BORDER };
-        egui::Frame::new()
-            .fill(TERM_BG)
-            .stroke(Stroke::new(1.0_f32, border))
-            .corner_radius(10)
-            .inner_margin(Margin::same(4))
-            .show(ui, |ui| {
-                ui.set_min_size(ui.available_size());
-                self.terminal_or_placeholder(ui, id, status, &a);
             });
     }
 
-    fn grid_view(&mut self, ui: &mut egui::Ui) {
-        let ids: Vec<u64> = self.state.agents.iter().map(|a| a.id).filter(|id| self.live.contains_key(id)).collect();
-        if ids.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("No agents running. Start some from the sidebar, or use “Start all”.").color(MUTED));
-            });
+    fn begin_rename(&mut self, id: u64) {
+        if let Some(a) = self.state.agent(id) {
+            self.renaming = Some((id, a.name.clone()));
+            self.rename_focus = true;
+        }
+    }
+
+    /// Agent name; double-click turns it into a text box.
+    fn name_widget(&mut self, ui: &mut egui::Ui, a: &Agent, size: f32) {
+        if self.renaming.as_ref().is_some_and(|(id, _)| *id == a.id) {
+            self.rename_box(ui, a.id, size, 200.0);
             return;
         }
-        let n = ids.len();
-        let cols = (n as f32).sqrt().ceil() as usize;
-        let rows = n.div_ceil(cols);
-        let gap = 10.0;
-        let area = ui.available_rect_before_wrap();
-        let tile_w = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
-        let tile_h = (area.height() - gap * (rows as f32 - 1.0)) / rows as f32;
-        ui.allocate_rect(area, Sense::hover());
+        let resp = ui
+            .add(egui::Label::new(RichText::new(&a.name).font(bold(size))).sense(Sense::click()).selectable(false))
+            .on_hover_text("Double-click to rename");
+        if resp.double_clicked() {
+            self.begin_rename(a.id);
+        }
+    }
 
-        for (i, id) in ids.into_iter().enumerate() {
-            let (c, r) = (i % cols, i / cols);
-            let min = area.min + Vec2::new(c as f32 * (tile_w + gap), r as f32 * (tile_h + gap));
-            let rect = egui::Rect::from_min_size(min, Vec2::new(tile_w, tile_h));
-            let a = self.state.agent(id).unwrap().clone();
-            let status = self.status(id);
-            let focused = ui.memory(|m| m.has_focus(term_id(id)));
-            let attention = self.attention.contains(&id);
-            let border = if focused {
-                a.provider.color().gamma_multiply(0.85)
-            } else if attention {
-                AMBER.gamma_multiply(0.7)
-            } else {
-                BORDER
-            };
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
-            egui::Frame::new()
-                .fill(PANEL)
-                .stroke(Stroke::new(1.0_f32, border))
-                .corner_radius(10)
-                .inner_margin(Margin::same(6))
-                .show(&mut child, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    ui.horizontal(|ui| {
-                        ui.add_space(4.0);
-                        app_icon(ui, a.provider, 18.0);
-                        ui.label(RichText::new(&a.name).font(bold(13.5)));
-                        status_pill(ui, status);
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.add(icon_button("⤢")).on_hover_text("Open in focus view").clicked() {
-                                self.actions.push(Action::OpenFocus(id));
-                            }
-                            if status.alive() {
-                                if ui.add(icon_button("■")).on_hover_text("Stop").clicked() {
-                                    self.actions.push(Action::Stop(id));
-                                }
-                            } else if ui.add(icon_button("↻")).on_hover_text("Restart").clicked() {
-                                self.actions.push(Action::Restart(id));
-                            }
-                            ui.label(
-                                RichText::new(format!("${:.3}", a.session_usage.cost_usd)).small().color(MUTED),
-                            );
-                        });
-                    });
-                    egui::Frame::new().fill(TERM_BG).corner_radius(6).inner_margin(Margin::same(2)).show(ui, |ui| {
-                        ui.set_min_size(ui.available_size());
-                        self.terminal_or_placeholder(ui, id, status, &a);
-                    });
-                });
+    /// Inline rename box: Enter saves, Esc or empty cancels.
+    fn rename_box(&mut self, ui: &mut egui::Ui, id: u64, size: f32, width: f32) {
+        let Some((_, buf)) = self.renaming.as_mut() else { return };
+        let resp = ui.add(
+            egui::TextEdit::singleline(buf)
+                .font(bold(size))
+                .desired_width(width.max(60.0))
+                .margin(Margin::symmetric(4, 1)),
+        );
+        if std::mem::take(&mut self.rename_focus) {
+            resp.request_focus();
+        }
+        if resp.lost_focus() {
+            let cancelled = ui.input(|i| i.key_pressed(Key::Escape));
+            let (_, name) = self.renaming.take().unwrap();
+            let name = name.trim();
+            if !cancelled && !name.is_empty() {
+                if let Some(a) = self.state.agent_mut(id) {
+                    a.name = name.to_string();
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -1237,8 +1234,6 @@ enum BtnKind {
     Icon,
     /// Focus/Grid toggle; `true` = the active one.
     Segment(bool),
-    /// Broadcast target chip in the agent's color; `true` = included.
-    Chip(Color32, bool),
 }
 
 /// Our button: smooth hover fade, pressed state, hand cursor.
@@ -1257,11 +1252,10 @@ impl egui::Widget for Btn {
         use BtnKind::*;
         let enabled = ui.is_enabled();
         let (font, pad_x, h, radius, min_w) = match self.kind {
-            Primary => (bold(13.5), 14.0, 30.0, 8.0, 0.0),
-            Ghost | Danger => (egui::FontId::proportional(13.5), 14.0, 30.0, 8.0, 0.0),
-            Icon => (egui::FontId::proportional(14.0), 6.0, 26.0, 6.0, 26.0),
-            Segment(_) => (egui::FontId::proportional(13.5), 14.0, 26.0, 6.0, 78.0),
-            Chip(..) => (egui::FontId::proportional(11.5), 10.0, 22.0, 11.0, 0.0),
+            Primary => (bold(13.0), 12.0, 28.0, 7.0, 0.0),
+            Ghost | Danger => (egui::FontId::proportional(13.0), 12.0, 28.0, 7.0, 0.0),
+            Icon => (egui::FontId::proportional(13.0), 5.0, 22.0, 5.0, 22.0),
+            Segment(_) => (egui::FontId::proportional(13.0), 12.0, 24.0, 6.0, 70.0),
         };
         let galley = ui.painter().layout_no_wrap(self.text, font, Color32::PLACEHOLDER);
         let size = Vec2::new((galley.size().x + pad_x * 2.0).max(min_w), h);
@@ -1279,8 +1273,6 @@ impl egui::Widget for Btn {
             Icon => (lp(clear, HOVER), Stroke::NONE, lp(MUTED, TEXT)),
             Segment(true) => (RAISED, Stroke::NONE, TEXT),
             Segment(false) => (lp(clear, HOVER.gamma_multiply(0.7)), Stroke::NONE, lp(MUTED, TEXT)),
-            Chip(c, true) => (lp(c.gamma_multiply(0.18), c.gamma_multiply(0.3)), Stroke::new(1.0_f32, lp(c.gamma_multiply(0.5), c.gamma_multiply(0.85))), TEXT),
-            Chip(c, false) => (lp(clear, HOVER), Stroke::new(1.0_f32, lp(BORDER, c.gamma_multiply(0.5))), lp(FAINT, MUTED)),
         };
         if resp.is_pointer_button_down_on() && enabled {
             fill = lerp_color(fill, Color32::BLACK, 0.18);
@@ -1320,41 +1312,12 @@ fn icon_button(text: &str) -> Btn {
     Btn { text: text.into(), kind: BtnKind::Icon }
 }
 
-fn pill(ui: &mut egui::Ui, text: &str, color: Color32, with_dot: bool) -> egui::Response {
-    let font = egui::FontId::proportional(11.5);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
-    let dot_w = if with_dot { 12.0 } else { 0.0 };
-    let size = Vec2::new(galley.size().x + 16.0 + dot_w, 20.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(10), color.gamma_multiply(0.14));
-    let mut x = rect.left() + 8.0;
-    if with_dot {
-        p.circle_filled(egui::pos2(x + 3.0, rect.center().y), 3.0, color);
-        x += dot_w;
-    }
-    p.galley(egui::pos2(x, rect.center().y - galley.size().y / 2.0), galley, color);
-    resp
+fn status_dot(ui: &mut egui::Ui, s: Status) {
+    let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
+    ui.painter().circle_filled(r.center(), 3.5, s.color());
 }
 
-fn status_pill(ui: &mut egui::Ui, s: Status) {
-    pill(ui, &s.label(), s.color(), true);
-}
 
-fn chip(ui: &mut egui::Ui, text: &str, color: Color32, on: bool) -> egui::Response {
-    let btn = Btn { text: text.into(), kind: BtnKind::Chip(color, on) };
-    ui.add(btn).on_hover_text(if on { "Click to exclude" } else { "Click to include" })
-}
-
-fn stat(ui: &mut egui::Ui, label: &str, value: &str) {
-    egui::Frame::new().fill(RAISED).corner_radius(7).inner_margin(Margin::symmetric(9, 4)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 5.0;
-            ui.label(RichText::new(label).small().color(MUTED));
-            ui.label(RichText::new(value).small().color(TEXT).strong());
-        });
-    });
-}
 
 fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(MUTED).strong());
@@ -1367,46 +1330,6 @@ fn found_label(ui: &mut egui::Ui, p: &Option<PathBuf>) {
     };
 }
 
-fn agent_card(ui: &mut egui::Ui, a: &Agent, status: Status, selected: bool, attention: bool, index: usize) -> egui::Response {
-    let fill = if selected { RAISED } else { PANEL };
-    let stroke = if selected { Stroke::new(1.0_f32, Color32::from_rgb(0x34, 0x3B, 0x50)) } else { Stroke::new(1.0_f32, Color32::TRANSPARENT) };
-    let inner = egui::Frame::new()
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(10)
-        .inner_margin(Margin { left: 16, right: 10, top: 9, bottom: 9 })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                app_icon(ui, a.provider, 18.0);
-                ui.label(RichText::new(&a.name).font(bold(14.0)));
-                if attention {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                    ui.painter().circle_filled(r.center(), 4.0, AMBER);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| status_pill(ui, status));
-            });
-            let model = if a.provider == Provider::OpenCode { "/models" } else if a.model.trim().is_empty() { "default" } else { a.model.trim() };
-            ui.label(RichText::new(format!("{} · {model}", a.provider.label())).small().color(MUTED));
-            let u = a.total_usage();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("${:.4}", u.cost_usd)).small().color(TEXT));
-                ui.label(RichText::new(format!("· {} tok", fmt_tokens(u.total_tokens()))).small().color(FAINT));
-                if index < 9 {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(format!("⌃⇧{}", index + 1)).small().color(FAINT));
-                    });
-                }
-            });
-        });
-    let rect = inner.response.rect;
-    let resp = ui.interact(rect, egui::Id::new(("card", a.id)), Sense::click());
-    let p = ui.painter();
-    if resp.hovered() && !selected {
-        p.rect_filled(rect, 10.0, Color32::from_white_alpha(6));
-    }
-    resp
-}
 
 fn provider_card(ui: &mut egui::Ui, p: Provider, sub: &str, selected: bool) -> egui::Response {
     let inner = egui::Frame::new()

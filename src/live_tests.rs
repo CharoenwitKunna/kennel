@@ -379,3 +379,31 @@ fn live_resume_home_probe() {
     dump("resume: after trusting", &sess);
     sess.kill();
 }
+
+#[test]
+#[ignore]
+fn live_question_probe() {
+    // Record what Claude's "waiting on you" screens look like.
+    crate::term::scrub_parent_session_env();
+    for (n, prompt) in [
+        (9008u64, "Run the shell command `echo kennel-probe` and show me its output."),
+        (9009u64, "Use your AskUserQuestion tool to ask me whether I prefer tea or coffee. Do nothing else."),
+    ] {
+        let mut a = Agent::new(n, "ask".into(), Provider::Claude);
+        a.cwd = std::env::temp_dir().join("agent-hub-live").to_string_lossy().into(); // trusted
+        a.model = "haiku".into();
+        let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
+        let sess = TermSession::spawn(launch.spec, 100, 32, egui::Context::default()).unwrap();
+        wait_for(&sess, &["\u{276f}"], 20);
+        wait_quiet(&sess, 1500, 10);
+        submit_checked(&sess, prompt);
+        std::thread::sleep(Duration::from_secs(4));
+        wait_quiet(&sess, 2500, 60);
+        println!(
+            "agent {n}: busy={} asks_user={}",
+            sess.busy(),
+            runner::screen_asks_user(&sess.screen_text())
+        );
+        sess.kill();
+    }
+}

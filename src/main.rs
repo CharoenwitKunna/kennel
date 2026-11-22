@@ -52,6 +52,8 @@ enum Status {
     Starting,
     Working,
     Waiting,
+    /// Idle on a question, permission prompt or confirmation: blocked on you.
+    Asking,
     Exited(i32),
 }
 
@@ -62,6 +64,7 @@ impl Status {
             Status::Starting => "Starting".into(),
             Status::Working => "Working".into(),
             Status::Waiting => "Ready".into(),
+            Status::Asking => "Needs you".into(),
             Status::Exited(0) => "Exited".into(),
             Status::Exited(c) => format!("Exited ({c})"),
         }
@@ -71,19 +74,24 @@ impl Status {
             Status::Stopped => GREY,
             Status::Starting => ACCENT,
             Status::Working => GREEN,
-            Status::Waiting => AMBER,
+            Status::Waiting => Color32::from_rgb(0x8F, 0x9B, 0xB8),
+            Status::Asking => AMBER,
             Status::Exited(0) => GREY,
             Status::Exited(_) => RED,
         }
     }
     fn alive(self) -> bool {
-        matches!(self, Status::Starting | Status::Working | Status::Waiting)
+        matches!(self, Status::Starting | Status::Working | Status::Waiting | Status::Asking)
     }
 }
 
 struct Live {
     sess: TermSession,
     was_working: bool,
+    /// Screen shows a question / permission prompt (refreshed by `scan_prompts`).
+    asking: bool,
+    was_asking: bool,
+    last_scan: Instant,
     /// The user has typed into this agent (gates "needs you").
     interacted: bool,
     claude: Option<ClaudeTracker>,
@@ -219,8 +227,26 @@ impl App {
             Status::Starting
         } else if l.sess.busy() {
             Status::Working
+        } else if l.asking {
+            Status::Asking
         } else {
             Status::Waiting
+        }
+    }
+
+    /// Look at idle agents' screens for questions / permission prompts.
+    /// Throttled; skipped while an agent is producing output.
+    fn scan_prompts(&mut self) {
+        for l in self.live.values_mut() {
+            if l.last_scan.elapsed() < Duration::from_millis(400) {
+                continue;
+            }
+            l.last_scan = Instant::now();
+            let idle = l.sess.exited().is_none()
+                && l.pending_trust.is_none() // Kennel is about to answer that one itself
+                && !l.sess.busy()
+                && l.sess.quiet_for().is_some_and(|d| d > Duration::from_millis(600));
+            l.asking = idle && runner::screen_asks_user(&l.sess.screen_text());
         }
     }
 
@@ -252,6 +278,9 @@ impl App {
             Live {
                 sess,
                 was_working: false,
+                asking: false,
+                was_asking: false,
+                last_scan: Instant::now(),
                 interacted: false,
                 claude,
                 last_poll: Instant::now(),
@@ -354,6 +383,7 @@ impl App {
         }
 
         self.answer_resume_trust();
+        self.scan_prompts();
         let focused_term = ctx.memory(|m| m.focused());
         let ids: Vec<u64> = self.live.keys().copied().collect();
         for id in ids {
@@ -361,14 +391,18 @@ impl App {
             let focused = focused_term == Some(term_id(id));
             let l = self.live.get_mut(&id).unwrap();
             let working = status == Status::Working;
-            let finished_turn = l.was_working && status == Status::Waiting;
+            let asking = status == Status::Asking;
+            let finished_turn = l.was_working && matches!(status, Status::Waiting | Status::Asking);
+            let newly_asking = asking && !l.was_asking;
             l.was_working = working;
+            l.was_asking = asking;
             let bell = l.sess.take_bell();
             let exited = matches!(status, Status::Exited(_)) && !l.final_polled;
             if exited {
                 l.final_polled = true;
             }
-            if ((finished_turn && l.interacted) || bell || exited) && !focused {
+            // A question always needs you; a finished turn only if you gave it one.
+            if ((finished_turn && l.interacted) || newly_asking || bell || exited) && !focused {
                 self.attention.insert(id);
             }
             if focused {
@@ -384,7 +418,7 @@ impl App {
 
     /// A resumed Claude conversation re-asks "trust this folder?" (always, for the
     /// home folder). The folder was trusted when the conversation began, so pick
-    /// "Yes"  14 but only if the prompt names this agent's own folder.
+    /// "Yes", but only if the prompt names this agent's own folder.
     fn answer_resume_trust(&mut self) {
         for l in self.live.values_mut() {
             let Some(folder) = l.pending_trust.as_deref() else { continue };
@@ -1411,12 +1445,21 @@ fn icon_button(text: &str) -> Btn {
 }
 
 /// Status as a dot (plus label if `label`), or a small pulse while working.
+/// Small amber "?" disc: the agent is waiting on your answer.
+fn question_badge(ui: &mut egui::Ui) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+    let painter = ui.painter();
+    painter.circle_filled(r.center(), 6.5, AMBER);
+    painter.text(r.center() + Vec2::new(0.0, 0.5), egui::Align2::CENTER_CENTER, "?", bold(10.0), Color32::from_rgb(0x1A, 0x14, 0x05));
+    resp
+}
+
 fn status_indicator(ui: &mut egui::Ui, s: Status, label: bool) {
     if s == Status::Working {
         working_pulse(ui);
         return;
     }
-    let dot = status_dot(ui, s);
+    let dot = if s == Status::Asking { question_badge(ui) } else { status_dot(ui, s) };
     if label {
         ui.label(RichText::new(s.label()).small().color(s.color()));
     } else {

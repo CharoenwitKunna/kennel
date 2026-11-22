@@ -249,6 +249,18 @@ fn short_path(p: &Path) -> Option<String> {
     (!s.contains(' ')).then_some(s)
 }
 
+// ---------- "waiting on you" detection ----------
+
+/// Footers/labels that only appear while a TUI waits for the user to answer:
+/// Claude's question menus and permission/trust prompts ("… · Esc to cancel"),
+/// and OpenCode's permission prompt.
+const ASK_MARKERS: &[&str] = &["Esc to cancel", "Do you want to proceed", "Permission required", "Allow once"];
+
+/// Does this screen show a question or permission prompt?
+pub fn screen_asks_user(screen: &str) -> bool {
+    ASK_MARKERS.iter().any(|m| screen.contains(m))
+}
+
 // ---------- Claude status line helper ----------
 
 pub fn live_file(agent_id: u64) -> PathBuf {
@@ -522,6 +534,20 @@ mod tests {
         let Some(TranscriptUsage::CostState(u)) = parse_claude_transcript_line(cs) else { panic!() };
         assert_eq!((u.input, u.output, u.cache_read, u.cache_write, u.cost_usd), (11, 2, 3, 4, 0.5));
         assert!(parse_claude_transcript_line(br#"{"type":"user","message":{}}"#).is_none());
+    }
+
+    #[test]
+    fn detects_waiting_prompts() {
+        // Captured from Claude Code 2.1.330 (AskUserQuestion menu).
+        let question = "☐ Drink\nDo you prefer tea or coffee?\n❯ 1. Tea\n  2. Coffee\nEnter to select · ↑/↓ to navigate · Esc to cancel";
+        assert!(screen_asks_user(question));
+        let trust = "❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel";
+        assert!(screen_asks_user(trust));
+        // Normal idle prompt and a working screen are not questions.
+        let idle = "● The command ran and printed:\n  kennel-probe\n────\n❯\n────\n  Haiku 5.5 · $0.004 · Kennel\n  ⏵⏵ auto mode on (shift+tab to cycle)";
+        assert!(!screen_asks_user(idle));
+        let working = "✻ Thinking… (3s · esc to interrupt)";
+        assert!(!screen_asks_user(working));
     }
 
     #[test]

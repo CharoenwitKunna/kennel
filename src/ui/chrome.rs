@@ -214,14 +214,45 @@ impl App {
                     });
                 });
                 if !renaming {
-                    ui.horizontal(|ui| {
-                        ui.add_space(19.0); // under the name, past the icon
-                        ui.add(
-                            egui::Label::new(RichText::new(card_subtitle(a)).size(10.5).color(FAINT))
-                                .truncate()
+                    // Running subagents, one small line each under the card.
+                    let subs = self
+                        .live
+                        .get(&a.id)
+                        .and_then(|l| l.claude.as_ref())
+                        .map(|t| t.subagents.as_slice())
+                        .unwrap_or(&[]);
+                    const MAX_SUBS: usize = 3;
+                    for s in subs.iter().take(MAX_SUBS) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(19.0);
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let (r, _) = ui.allocate_exact_size(Vec2::new(8.0, 12.0), Sense::hover());
+                            // Tree elbow: "└" in the agent's color.
+                            let stroke = Stroke::new(1.0_f32, a.provider.color().gamma_multiply(0.7));
+                            let (x, top, mid) = (r.left() + 2.5, r.top() + 1.0, r.center().y);
+                            ui.painter().line_segment([egui::pos2(x, top), egui::pos2(x, mid)], stroke);
+                            ui.painter().line_segment([egui::pos2(x, mid), egui::pos2(r.right(), mid)], stroke);
+                            let label = ui.add(
+                                egui::Label::new(RichText::new(&s.description).size(10.5).color(MUTED))
+                                    .truncate()
+                                    .selectable(false),
+                            );
+                            if !s.kind.is_empty() {
+                                label.on_hover_text(format!("Subagent ({}): {}", s.kind, s.description));
+                            }
+                        });
+                    }
+                    if subs.len() > MAX_SUBS {
+                        ui.horizontal(|ui| {
+                            ui.add_space(31.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("+{} more subagents", subs.len() - MAX_SUBS)).size(10.0).color(FAINT),
+                                )
                                 .selectable(false),
-                        );
-                    });
+                            );
+                        });
+                    }
                 }
             });
         let rect = inner.response.rect;
@@ -233,7 +264,7 @@ impl App {
             ui.painter().rect_filled(rect, 6.0, Color32::from_black_alpha(110));
         }
         let resp = if self.dragging.is_none() {
-            resp.on_hover_text(format!("{}\n\nDouble-click to rename · drag to reorder", agent_info(a)))
+            resp.on_hover_text(format!("{}\n\nDouble-click to rename · drag to reorder", self.info_text(a)))
         } else {
             resp
         };

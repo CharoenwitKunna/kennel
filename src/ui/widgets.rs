@@ -423,21 +423,6 @@ pub(crate) fn pane_stats(ui: &mut egui::Ui, a: &Agent, context: Option<f32>, rtl
     }
 }
 
-/// Second line of a sidebar card: "folder · model".
-pub(crate) fn card_subtitle(a: &Agent) -> String {
-    let cwd = a.cwd.trim().trim_end_matches(['\\', '/']);
-    let folder = if cwd.is_empty() {
-        "~".to_string()
-    } else {
-        std::path::Path::new(cwd).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| cwd.to_string())
-    };
-    let model = match a.provider {
-        Provider::Claude if a.model.trim().is_empty() => "default model",
-        Provider::Claude => a.model.trim(),
-        Provider::OpenCode => "OpenCode",
-    };
-    format!("{folder} · {model}")
-}
 
 pub(crate) fn context_color(pct: f32) -> Color32 {
     if pct >= 85.0 {
@@ -449,19 +434,39 @@ pub(crate) fn context_color(pct: f32) -> Color32 {
     }
 }
 
-/// Hover card for an agent: where it runs and how.
-pub(crate) fn agent_info(a: &Agent) -> String {
-    let folder = if a.cwd.trim().is_empty() { "home folder" } else { a.cwd.trim() };
-    let model = match a.provider {
-        Provider::OpenCode => "picked in OpenCode (/models)",
-        Provider::Claude if a.model.trim().is_empty() => "default",
-        Provider::Claude => a.model.trim(),
+/// Hover card for an agent: model, thinking, context, tokens and cost.
+/// `live` is the running Claude session's status-line info, when there is one.
+pub(crate) fn agent_info(a: &Agent, live: Option<&crate::usage::StatusInfo>, context_pct: Option<f32>) -> String {
+    let live = live.cloned().unwrap_or_default();
+    let model = match (live.model, a.provider) {
+        (Some(m), _) => m,
+        (None, Provider::OpenCode) => "picked in OpenCode (/models)".into(),
+        (None, Provider::Claude) if a.model.trim().is_empty() => "default".into(),
+        (None, Provider::Claude) => a.model.trim().to_string(),
     };
-    let session = a.session_id.as_deref().map(|s| s.chars().take(13).collect::<String>() + "…").unwrap_or_else(|| "new".into());
+    let thinking = match (live.thinking, live.effort) {
+        (Some(false), _) => "off".to_string(),
+        (Some(true), Some(e)) => format!("on · effort {e}"),
+        (Some(true), None) => "on".to_string(),
+        (None, Some(e)) => format!("effort {e}"),
+        (None, None) => "—".to_string(),
+    };
+    let ctx = match (live.context, context_pct) {
+        (Some((used, size)), pct) => {
+            let pct = pct.unwrap_or(if size > 0 { used as f32 * 100.0 / size as f32 } else { 0.0 });
+            format!("{} / {} ({pct:.0}%)", fmt_tokens(used), fmt_tokens(size))
+        }
+        (None, Some(pct)) => format!("{pct:.0}%"),
+        (None, None) => "—".to_string(),
+    };
+    let u = &a.session_usage;
     format!(
-        "{}\nFolder: {folder}\nModel: {model}\nPermissions: {}\nSession: {session}",
+        "{} · {model}\nThinking: {thinking}\nContext: {ctx}\nIn: {} (cached {})\nOut: {}\nCost: ${:.2}",
         a.provider.label(),
-        a.permission.label()
+        fmt_tokens(u.input + u.cache_read + u.cache_write),
+        fmt_tokens(u.cache_read),
+        fmt_tokens(u.output),
+        u.cost_usd,
     )
 }
 

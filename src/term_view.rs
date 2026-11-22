@@ -254,12 +254,11 @@ pub fn show(
                     sess.term.lock().selection = None;
                 }
                 _ => {
-                    if let Some(clip) = read_clipboard_text() {
-                        if !clip.is_empty() {
-                            sess.paste(&clip);
-                            sess.scroll_to_bottom();
-                            typed = true;
-                        }
+                    let clip = read_clipboard_text().filter(|c| !c.is_empty()).or_else(clipboard_attachment);
+                    if let Some(clip) = clip {
+                        sess.paste(&clip);
+                        sess.scroll_to_bottom();
+                        typed = true;
                     }
                 }
             }
@@ -331,6 +330,18 @@ pub fn show(
                 egui::Event::Cut => {
                     sess.write(vec![0x18]);
                     typed = true;
+                }
+                // egui turns the Ctrl+V press into a Paste event only when the
+                // clipboard holds text, but the release still arrives. Without
+                // text, paste a copied image (saved as PNG) or copied files as paths.
+                egui::Event::Key { key: Key::V, pressed: false, modifiers, .. }
+                    if modifiers.command && !modifiers.alt && read_clipboard_text().is_none_or(|t| t.is_empty()) =>
+                {
+                    if let Some(paths) = clipboard_attachment() {
+                        sess.paste(&paths);
+                        sess.scroll_to_bottom();
+                        typed = true;
+                    }
                 }
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
                     // Shift+PageUp/PageDown/Home/End scroll the viewport directly.
@@ -565,6 +576,50 @@ pub fn format_dropped_paths(paths: &[PathBuf]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Non-text clipboard contents as something a TUI can use: copied files
+/// (Explorer) become their quoted paths; an image (screenshot, browser "Copy
+/// image") is saved as a PNG and its path returned, so the agent can read it.
+fn clipboard_attachment() -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    if let Ok(files) = cb.get().file_list() {
+        let s = format_dropped_paths(&files);
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    let img = cb.get_image().ok()?;
+    drop(cb);
+    let path = save_pasted_image(img.width as u32, img.height as u32, &img.bytes)?;
+    Some(format_dropped_paths(&[path]))
+}
+
+/// Write RGBA pixels to `%TEMP%\kennel-pastes\paste-<time>.png`, pruning
+/// pastes older than a week.
+fn save_pasted_image(w: u32, h: u32, rgba: &[u8]) -> Option<PathBuf> {
+    use image::ImageEncoder;
+    let dir = std::env::temp_dir().join("kennel-pastes");
+    std::fs::create_dir_all(&dir).ok()?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let week = std::time::Duration::from_secs(7 * 24 * 3600);
+        for e in entries.flatten() {
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d > week);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let path = dir.join(format!("paste-{ms}.png"));
+    let file = std::io::BufWriter::new(std::fs::File::create(&path).ok()?);
+    let enc = image::codecs::png::PngEncoder::new_with_quality(
+        file,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    enc.write_image(rgba, w, h, image::ExtendedColorType::Rgba8).ok()?;
+    Some(path)
 }
 
 /// Read UTF-16 text from the Windows clipboard without extra crate dependencies.
@@ -1644,5 +1699,23 @@ mod link_tests {
         assert_eq!(strip_line_suffix("a.rs:12:5"), "a.rs");
         assert_eq!(strip_line_suffix(r"C:\x\a.rs:7"), r"C:\x\a.rs");
         assert_eq!(strip_line_suffix("C:"), "C:");
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    /// Touches the real clipboard, so run by hand: `cargo test clipboard_image -- --ignored`.
+    #[test]
+    #[ignore]
+    fn clipboard_image_becomes_png_path() {
+        let mut cb = arboard::Clipboard::new().unwrap();
+        let px = vec![255u8, 0, 0, 255].repeat(4 * 3);
+        cb.set_image(arboard::ImageData { width: 4, height: 3, bytes: px.into() }).unwrap();
+        drop(cb);
+        let pasted = super::clipboard_attachment().expect("image pasted as a path");
+        let p = std::path::PathBuf::from(pasted.trim_matches('"'));
+        let img = image::open(&p).expect("valid png");
+        assert_eq!((img.width(), img.height()), (4, 3));
+        std::fs::remove_file(p).unwrap();
     }
 }

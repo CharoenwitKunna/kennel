@@ -1040,8 +1040,10 @@ name = "kennel"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "arboard",
  "eframe",
  "embed-resource",
+ "image",
  "serde",
  "serde_json",
 ]

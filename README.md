@@ -37,6 +37,7 @@ token/context tracking, and persistent sessions and layout.
 | `Ctrl+Click` | Open URL or file path under cursor |
 | Right-click | Copy selection, or paste clipboard if nothing is selected |
 | Drag & drop files | Paste quoted file paths into the target terminal |
+| `Ctrl+V` with an image or copied files | Paste the files' paths; an image is saved to `%TEMP%\kennel-pastes` as PNG first |
 
 ## Download
 

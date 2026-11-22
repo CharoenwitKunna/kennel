@@ -67,15 +67,6 @@ enum View {
     Grid,
 }
 
-impl From<SavedView> for View {
-    fn from(v: SavedView) -> Self {
-        match v {
-            SavedView::Focus => View::Focus,
-            SavedView::Grid => View::Grid,
-        }
-    }
-}
-
 impl From<View> for SavedView {
     fn from(v: View) -> Self {
         match v {
@@ -92,6 +83,8 @@ struct Live {
     /// Screen shows a question / permission prompt (refreshed by `scan_prompts`).
     asking: bool,
     last_scan: Instant,
+    /// Last check of this Claude agent's running subagents.
+    last_sub_scan: Instant,
     /// The user has typed into this agent (gates "needs you").
     interacted: bool,
     claude: Option<ClaudeTracker>,
@@ -208,7 +201,8 @@ impl App {
         let (bg_tx, bg_rx) = channel();
         let selected = state.agents.first().map(|a| a.id);
         let new_folder = state.settings.last_folder.clone();
-        let view = View::from(state.layout.view);
+        // Always open in Focus view (Grid is one click / Ctrl+Shift+G away).
+        let view = View::Focus;
         let grid_cols = if WindowLayout::valid_tracks(&state.layout.grid_cols) {
             state.layout.grid_cols.clone()
         } else {
@@ -279,6 +273,12 @@ impl App {
         self.live.get(&id).map(|l| l.track.since.elapsed())
     }
 
+    /// Hover text for an agent, with live model/context info while it runs.
+    fn info_text(&self, a: &Agent) -> String {
+        let t = self.live.get(&a.id).and_then(|l| l.claude.as_ref());
+        ui::widgets::agent_info(a, t.map(|t| &t.info), t.and_then(|t| t.context_pct))
+    }
+
     fn toast(&mut self, msg: impl Into<String>) {
         self.toasts.push((Instant::now(), msg.into()));
     }
@@ -345,6 +345,7 @@ impl App {
                 search: term_view::TermSearch::default(),
                 asking: false,
                 last_scan: Instant::now(),
+                last_sub_scan: Instant::now() - Duration::from_secs(10),
                 interacted: false,
                 claude,
                 last_poll: Instant::now(),
@@ -410,6 +411,11 @@ impl App {
                 if let Some(t) = l.claude.as_mut() {
                     let u = t.poll();
                     let a = self.state.agent_mut(id).unwrap();
+                    if a.session_id.as_deref() != Some(t.session_id()) {
+                        // Resume the new session next launch.
+                        a.session_id = Some(t.session_id().to_string());
+                        self.dirty = true;
+                    }
                     if a.session_usage != u {
                         a.session_usage = u;
                         self.dirty = true;
@@ -476,6 +482,12 @@ impl App {
             }
             if focused {
                 self.attention.remove(&id);
+            }
+            if status.alive() && l.last_sub_scan.elapsed() > Duration::from_secs(2) {
+                l.last_sub_scan = now;
+                if let Some(t) = l.claude.as_mut() {
+                    t.scan_subagents();
+                }
             }
             if ev.finished_turn || ev.exited {
                 self.poll_usage(id, true);
@@ -657,9 +669,6 @@ impl eframe::App for App {
         if !self.autostarted {
             self.autostarted = true;
             let ids: Vec<u64> = self.state.agents.iter().filter(|a| a.resume_on_launch).map(|a| a.id).collect();
-            if ids.len() > 1 && self.state.layout.width.is_none() {
-                self.view = View::Grid;
-            }
             for id in ids {
                 self.actions.push(Action::Start(id));
             }

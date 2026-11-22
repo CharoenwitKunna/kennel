@@ -116,7 +116,7 @@ impl App {
                         if resp.middle_clicked() && status.alive() {
                             self.actions.push(Action::Stop(a.id));
                         }
-                        resp.on_hover_text(format!("{}\n\nDouble-click to rename · middle-click to stop", agent_info(a)));
+                        resp.on_hover_text(format!("{}\n\nDouble-click to rename · middle-click to stop", self.info_text(a)));
                     }
                 });
             });
@@ -325,7 +325,7 @@ impl App {
         }
         let resp = ui
             .add(egui::Label::new(RichText::new(&a.name).font(bold(size))).sense(Sense::click()).selectable(false))
-            .on_hover_text(format!("{}\n\nDouble-click to rename", agent_info(a)));
+            .on_hover_text(format!("{}\n\nDouble-click to rename", self.info_text(a)));
         if resp.double_clicked() {
             self.begin_rename(a.id);
         }

@@ -7,7 +7,7 @@ description = "Kennel: run Claude Code and OpenCode agents side by side in real 
 [dependencies]
 alacritty_terminal = "0.25"
 # glow (OpenGL) renderer instead of wgpu, no accesskit: keeps RSS and binary small
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Already in the tree via egui-winit: clipboard images / copied files -> pasted paths.

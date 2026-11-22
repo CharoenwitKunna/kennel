@@ -3,7 +3,6 @@
 
 mod agent;
 mod runner;
-mod sysmem;
 mod term;
 mod term_view;
 mod theme;
@@ -154,7 +153,6 @@ struct App {
     dirty: bool,
     last_save: Instant,
     self_exe: PathBuf,
-    mem: (Instant, Option<u64>),
     focus_term: Option<u64>,
     /// Agents flagged `resume_on_launch` have been started.
     autostarted: bool,
@@ -194,7 +192,6 @@ impl App {
             dirty: false,
             last_save: Instant::now(),
             self_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kennel.exe")),
-            mem: (Instant::now() - Duration::from_secs(10), None),
             focus_term: None,
             autostarted: false,
             open_new_menu: false,
@@ -485,46 +482,6 @@ impl App {
                                 self.view = View::Grid;
                             }
                         }
-                    });
-                });
-            });
-    }
-
-    fn status_bar(&mut self, ctx: &egui::Context) {
-        if self.mem.0.elapsed() > Duration::from_secs(2) {
-            self.mem = (Instant::now(), sysmem::working_set_bytes());
-        }
-        egui::TopBottomPanel::bottom("statusbar")
-            .exact_height(28.0)
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(14, 0)).stroke(Stroke::new(1.0_f32, BORDER)))
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let (mut working, mut waiting) = (0, 0);
-                    for a in &self.state.agents {
-                        match self.status(a.id) {
-                            Status::Working | Status::Starting => working += 1,
-                            Status::Waiting => waiting += 1,
-                            _ => {}
-                        }
-                    }
-                    dot_label(ui, GREEN, &format!("{working} working"));
-                    ui.add_space(6.0);
-                    dot_label(ui, AMBER, &format!("{waiting} ready"));
-                    if !self.attention.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(format!("{} need you", self.attention.len())).small().color(AMBER));
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(m) = self.mem.1 {
-                            ui.label(RichText::new(format!("RAM {:.0} MB", m as f64 / 1_048_576.0)).small().color(MUTED));
-                            ui.add_space(8.0);
-                        }
-                        let u = self.state.total_usage();
-                        ui.label(
-                            RichText::new(format!("{} tokens", fmt_tokens(u.total_tokens()))).small().color(MUTED),
-                        );
-                        ui.label(RichText::new(format!("${:.4}", u.cost_usd)).small().color(TEXT));
-                        ui.label(RichText::new("Total").small().color(MUTED));
                     });
                 });
             });
@@ -1222,7 +1179,6 @@ impl eframe::App for App {
         self.tick(ctx);
         self.shortcuts(ctx);
         self.toolbar(ctx);
-        self.status_bar(ctx);
         self.sidebar(ctx);
         self.central(ctx);
         self.editor_window(ctx);
@@ -1270,12 +1226,7 @@ fn segmented(ui: &mut egui::Ui, view: &mut View) {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.horizontal(|ui| {
             for (v, label) in [(View::Focus, "▣  Focus"), (View::Grid, "▦  Grid")] {
-                let on = *view == v;
-                let btn = egui::Button::new(RichText::new(label).color(if on { TEXT } else { MUTED }))
-                    .fill(if on { RAISED } else { Color32::TRANSPARENT })
-                    .stroke(Stroke::NONE)
-                    .corner_radius(6)
-                    .min_size(Vec2::new(78.0, 24.0));
+                let btn = Btn { text: label.into(), kind: BtnKind::Segment(*view == v) };
                 if ui.add(btn).on_hover_text("Ctrl+Shift+G").clicked() {
                     *view = v;
                 }
@@ -1284,32 +1235,95 @@ fn segmented(ui: &mut egui::Ui, view: &mut View) {
     });
 }
 
-fn primary_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text.to_owned()).color(Color32::WHITE).strong())
-        .fill(ACCENT.gamma_multiply(0.9))
-        .stroke(Stroke::NONE)
-        .corner_radius(8)
-        .min_size(Vec2::new(0.0, 30.0))
+#[derive(Clone, Copy, PartialEq)]
+enum BtnKind {
+    Primary,
+    Ghost,
+    Danger,
+    Icon,
+    /// Focus/Grid toggle; `true` = the active one.
+    Segment(bool),
+    /// Broadcast target chip in the agent's color; `true` = included.
+    Chip(Color32, bool),
 }
 
-fn ghost_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text.to_owned()).color(TEXT)).corner_radius(8).min_size(Vec2::new(0.0, 30.0))
+/// Our button: smooth hover fade, pressed state, hand cursor.
+struct Btn {
+    text: String,
+    kind: BtnKind,
 }
 
-fn danger_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text.to_owned()).color(Color32::WHITE))
-        .fill(RED.gamma_multiply(0.75))
-        .stroke(Stroke::NONE)
-        .corner_radius(8)
-        .min_size(Vec2::new(0.0, 30.0))
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_premultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
-fn icon_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text.to_owned()).color(MUTED))
-        .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::NONE)
-        .corner_radius(6)
-        .min_size(Vec2::new(24.0, 22.0))
+impl egui::Widget for Btn {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        use BtnKind::*;
+        let enabled = ui.is_enabled();
+        let (font, pad_x, h, radius, min_w) = match self.kind {
+            Primary => (bold(13.5), 14.0, 30.0, 8.0, 0.0),
+            Ghost | Danger => (egui::FontId::proportional(13.5), 14.0, 30.0, 8.0, 0.0),
+            Icon => (egui::FontId::proportional(14.0), 6.0, 26.0, 6.0, 26.0),
+            Segment(_) => (egui::FontId::proportional(13.5), 14.0, 26.0, 6.0, 78.0),
+            Chip(..) => (egui::FontId::proportional(11.5), 10.0, 22.0, 11.0, 0.0),
+        };
+        let galley = ui.painter().layout_no_wrap(self.text, font, Color32::PLACEHOLDER);
+        let size = Vec2::new((galley.size().x + pad_x * 2.0).max(min_w), h);
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let hovered = resp.hovered() && enabled;
+        let t = ui.ctx().animate_bool_with_time(resp.id.with("hover"), hovered, 0.12);
+        let lp = |a: Color32, b: Color32| lerp_color(a, b, t);
+        let clear = Color32::TRANSPARENT;
+        let accent_hi = Color32::from_rgb(0x95, 0xA3, 0xFF);
+        let red_hi = Color32::from_rgb(0xF0, 0x6E, 0x6E);
+        let (mut fill, stroke, mut fg) = match self.kind {
+            Primary => (lp(ACCENT.gamma_multiply(0.9), accent_hi), Stroke::NONE, Color32::WHITE),
+            Ghost => (lp(RAISED, HOVER), Stroke::new(1.0_f32, lp(BORDER, Color32::from_rgb(0x3E, 0x46, 0x5E))), lp(TEXT, Color32::WHITE)),
+            Danger => (lp(RED.gamma_multiply(0.75), red_hi), Stroke::NONE, Color32::WHITE),
+            Icon => (lp(clear, HOVER), Stroke::NONE, lp(MUTED, TEXT)),
+            Segment(true) => (RAISED, Stroke::NONE, TEXT),
+            Segment(false) => (lp(clear, HOVER.gamma_multiply(0.7)), Stroke::NONE, lp(MUTED, TEXT)),
+            Chip(c, true) => (lp(c.gamma_multiply(0.18), c.gamma_multiply(0.3)), Stroke::new(1.0_f32, lp(c.gamma_multiply(0.5), c.gamma_multiply(0.85))), TEXT),
+            Chip(c, false) => (lp(clear, HOVER), Stroke::new(1.0_f32, lp(BORDER, c.gamma_multiply(0.5))), lp(FAINT, MUTED)),
+        };
+        if resp.is_pointer_button_down_on() && enabled {
+            fill = lerp_color(fill, Color32::BLACK, 0.18);
+        }
+        if !enabled {
+            fill = fill.gamma_multiply(0.45);
+            fg = fg.gamma_multiply(0.45);
+        }
+        let painter = ui.painter();
+        painter.rect_filled(rect, radius, fill);
+        if stroke.width > 0.0 {
+            painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
+        }
+        let pos = rect.center() - galley.size() / 2.0;
+        painter.galley(pos, galley, fg);
+        if enabled {
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            resp
+        }
+    }
+}
+
+fn primary_button(text: &str) -> Btn {
+    Btn { text: text.into(), kind: BtnKind::Primary }
+}
+
+fn ghost_button(text: &str) -> Btn {
+    Btn { text: text.into(), kind: BtnKind::Ghost }
+}
+
+fn danger_button(text: &str) -> Btn {
+    Btn { text: text.into(), kind: BtnKind::Danger }
+}
+
+fn icon_button(text: &str) -> Btn {
+    Btn { text: text.into(), kind: BtnKind::Icon }
 }
 
 fn pill(ui: &mut egui::Ui, text: &str, color: Color32, with_dot: bool) -> egui::Response {
@@ -1334,12 +1348,7 @@ fn status_pill(ui: &mut egui::Ui, s: Status) {
 }
 
 fn chip(ui: &mut egui::Ui, text: &str, color: Color32, on: bool) -> egui::Response {
-    let fg = if on { TEXT } else { FAINT };
-    let btn = egui::Button::new(RichText::new(text).small().color(fg))
-        .fill(if on { color.gamma_multiply(0.18) } else { Color32::TRANSPARENT })
-        .stroke(Stroke::new(1.0_f32, if on { color.gamma_multiply(0.5) } else { BORDER }))
-        .corner_radius(12)
-        .min_size(Vec2::new(0.0, 22.0));
+    let btn = Btn { text: text.into(), kind: BtnKind::Chip(color, on) };
     ui.add(btn).on_hover_text(if on { "Click to exclude" } else { "Click to include" })
 }
 
@@ -1351,12 +1360,6 @@ fn stat(ui: &mut egui::Ui, label: &str, value: &str) {
             ui.label(RichText::new(value).small().color(TEXT).strong());
         });
     });
-}
-
-fn dot_label(ui: &mut egui::Ui, color: Color32, text: &str) {
-    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-    ui.painter().circle_filled(r.center(), 3.5, color);
-    ui.label(RichText::new(text).small().color(MUTED));
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str) {

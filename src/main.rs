@@ -627,21 +627,6 @@ impl App {
             .width_range(170.0..=360.0)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::same(8)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
-                // Total spend, pinned at the bottom, one line.
-                egui::TopBottomPanel::bottom("totals").frame(egui::Frame::new().inner_margin(Margin::symmetric(0, 4))).show_inside(
-                    ui,
-                    |ui| {
-                        let u = self.state.total_usage();
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Total").small().color(MUTED));
-                            ui.label(RichText::new(format!("${:.4}", u.cost_usd)).font(bold(13.0)));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(format!("{} tok", fmt_tokens(u.total_tokens()))).small().color(FAINT));
-                            });
-                        });
-                    },
-                );
-
                 if self.state.agents.is_empty() {
                     ui.add_space(16.0);
                     ui.vertical_centered(|ui| {
@@ -743,7 +728,6 @@ impl App {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(RichText::new(format!("${:.2}", a.total_usage().cost_usd)).small().color(FAINT));
                         status_indicator(ui, status, false, age);
                         unread_badge(ui, unread);
                         if attention {
@@ -763,8 +747,6 @@ impl App {
         let resp = ui.interact(rect, egui::Id::new(("card", a.id)), Sense::click_and_drag());
         if self.dragging == Some(a.id) {
             ui.painter().rect_filled(rect, 6.0, Color32::from_black_alpha(110));
-        } else if resp.hovered() && !selected && self.dragging.is_none() {
-            ui.painter().rect_filled(rect, 6.0, Color32::from_white_alpha(6));
         }
         let resp = if self.dragging.is_none() {
             resp.on_hover_text(format!("{}\n\nDouble-click to rename · drag to reorder", agent_info(a)))
@@ -1002,7 +984,7 @@ impl App {
                     status_indicator(ui, status, true, age);
                     let u = a.session_usage;
                     ui.label(
-                        RichText::new(format!("${:.4} · {} tok", u.cost_usd, fmt_tokens(u.total_tokens()))).small().color(FAINT),
+                        RichText::new(format!("{} tok", fmt_tokens(u.total_tokens()))).small().color(FAINT),
                     );
                     if let Some(p) = context {
                         ui.label(RichText::new(format!("ctx {p:.0}%")).small().color(context_color(p)))

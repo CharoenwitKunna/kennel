@@ -85,10 +85,6 @@ impl Usage {
         self.cache_write += o.cache_write;
         self.cost_usd += o.cost_usd;
     }
-    pub fn plus(mut self, o: &Usage) -> Usage {
-        self.add(o);
-        self
-    }
     pub fn total_tokens(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_write
     }
@@ -142,10 +138,6 @@ impl Agent {
             runs: 0,
             resume_on_launch: false,
         }
-    }
-
-    pub fn total_usage(&self) -> Usage {
-        self.usage_archived.plus(&self.session_usage)
     }
 
     /// Forget the session; the next start opens a fresh conversation.
@@ -272,13 +264,5 @@ impl State {
 
     pub fn agent(&self, id: u64) -> Option<&Agent> {
         self.agents.iter().find(|a| a.id == id)
-    }
-
-    pub fn total_usage(&self) -> Usage {
-        let mut u = Usage::default();
-        for a in &self.agents {
-            u.add(&a.total_usage());
-        }
-        u
     }
 }

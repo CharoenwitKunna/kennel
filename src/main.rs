@@ -81,9 +81,6 @@ impl Status {
     }
 }
 
-/// Output quieter than this counts as "ready for you".
-const QUIET: Duration = Duration::from_millis(1500);
-
 struct Live {
     sess: TermSession,
     was_working: bool,
@@ -212,10 +209,12 @@ impl App {
         if let Some(code) = l.sess.exited() {
             return Status::Exited(code);
         }
-        match l.sess.quiet_for() {
-            None => Status::Starting,
-            Some(d) if d < QUIET => Status::Working,
-            Some(_) => Status::Waiting,
+        if l.sess.quiet_for().is_none() {
+            Status::Starting
+        } else if l.sess.busy() {
+            Status::Working
+        } else {
+            Status::Waiting
         }
     }
 
@@ -603,8 +602,7 @@ impl App {
                 // Keep this row while renaming so the card keeps its size.
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    status_dot(ui, status);
-                    ui.label(RichText::new(status.label()).small().color(status.color()));
+                    status_indicator(ui, status);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(RichText::new(format!("${:.3}", a.total_usage().cost_usd)).small().color(MUTED));
                     });
@@ -694,8 +692,7 @@ impl App {
                     ui.add_space(4.0);
                     app_icon(ui, a.provider, 16.0);
                     self.name_widget(ui, &a, 13.5);
-                    status_dot(ui, status);
-                    ui.label(RichText::new(status.label()).small().color(status.color()));
+                    status_indicator(ui, status);
                     let u = a.session_usage;
                     ui.label(
                         RichText::new(format!("${:.4} · {} tok", u.cost_usd, fmt_tokens(u.total_tokens()))).small().color(FAINT),
@@ -1312,6 +1309,31 @@ fn danger_button(text: &str) -> Btn {
 
 fn icon_button(text: &str) -> Btn {
     Btn { text: text.into(), kind: BtnKind::Icon }
+}
+
+/// Status as a dot + label, or an animated wave while the agent is working.
+fn status_indicator(ui: &mut egui::Ui, s: Status) {
+    if s == Status::Working {
+        working_wave(ui);
+    } else {
+        status_dot(ui, s);
+        ui.label(RichText::new(s.label()).small().color(s.color()));
+    }
+}
+
+/// Three dots rising and falling in a wave.
+fn working_wave(ui: &mut egui::Ui) {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 14.0), Sense::hover());
+    let t = ui.input(|i| i.time) as f32;
+    let painter = ui.painter();
+    for i in 0..3 {
+        let k = ((t * 6.0 - i as f32 * 0.9).sin() + 1.0) / 2.0; // 0..1
+        let center = egui::pos2(rect.left() + 5.0 + i as f32 * 9.0, rect.center().y + 2.0 - k * 4.0);
+        painter.circle_filled(center, 2.3 + k * 0.7, GREEN.gamma_multiply(0.4 + 0.6 * k));
+    }
+    resp.on_hover_text("Working");
+    // ~30 fps, and only while something is working.
+    ui.ctx().request_repaint_after(Duration::from_millis(33));
 }
 
 fn status_dot(ui: &mut egui::Ui, s: Status) {

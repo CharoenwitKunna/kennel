@@ -9,7 +9,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
 use eframe::egui;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -41,6 +41,8 @@ pub struct Shared {
     start: Instant,
     /// ms since `start` of the last PTY output (0 = none yet)
     last_output_ms: AtomicU64,
+    /// Recent quarter-second slots (ms / 250) that had output, oldest first.
+    activity: Mutex<VecDeque<u64>>,
     exited: AtomicBool,
     exit_code: AtomicI32,
     pub bell: AtomicBool,
@@ -67,6 +69,7 @@ impl EventListener for Listener {
             TEvent::Wakeup => {
                 let ms = s.start.elapsed().as_millis() as u64;
                 s.last_output_ms.store(ms.max(1), Ordering::Relaxed);
+                record_activity(&mut s.activity.lock().unwrap(), ms / SLOT_MS);
                 s.ctx.request_repaint();
             }
             TEvent::PtyWrite(text) => s.reply(text),
@@ -139,6 +142,7 @@ impl TermSession {
             ctx,
             start: Instant::now(),
             last_output_ms: AtomicU64::new(0),
+            activity: Mutex::new(VecDeque::new()),
             exited: AtomicBool::new(false),
             exit_code: AtomicI32::new(0),
             bell: AtomicBool::new(false),
@@ -218,6 +222,14 @@ impl TermSession {
         }
         let now = self.shared.start.elapsed().as_millis() as u64;
         Some(Duration::from_millis(now.saturating_sub(ms)))
+    }
+
+    /// Busy = sustained output (a working TUI redraws its spinner many times a
+    /// second). Idle TUIs that blink a cursor or rotate a hint every couple of
+    /// seconds don't count.
+    pub fn busy(&self) -> bool {
+        let now = self.shared.start.elapsed().as_millis() as u64 / SLOT_MS;
+        is_busy(&self.shared.activity.lock().unwrap(), now)
     }
 
     pub fn take_bell(&self) -> bool {
@@ -309,5 +321,64 @@ pub fn kill_tree(pid: u32) {
     #[cfg(not(windows))]
     {
         let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+    }
+}
+
+/// Activity is tracked in slots of this many ms.
+const SLOT_MS: u64 = 250;
+/// Window looked at, in slots (2 s).
+const WINDOW_SLOTS: u64 = 8;
+/// Active slots within the window needed to count as busy (1 s of output).
+const BUSY_SLOTS: usize = 4;
+
+fn record_activity(slots: &mut VecDeque<u64>, slot: u64) {
+    if slots.back() != Some(&slot) {
+        slots.push_back(slot);
+    }
+    while slots.front().is_some_and(|&s| s + WINDOW_SLOTS < slot) {
+        slots.pop_front();
+    }
+}
+
+fn is_busy(slots: &VecDeque<u64>, now: u64) -> bool {
+    slots.iter().filter(|&&s| s + WINDOW_SLOTS > now).count() >= BUSY_SLOTS
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    fn slots(list: &[u64]) -> VecDeque<u64> {
+        let mut d = VecDeque::new();
+        for &s in list {
+            record_activity(&mut d, s);
+        }
+        d
+    }
+
+    #[test]
+    fn spinner_is_busy() {
+        // Output in every slot for the last second.
+        assert!(is_busy(&slots(&[10, 11, 12, 13, 14]), 14));
+    }
+
+    #[test]
+    fn occasional_blips_are_idle() {
+        // A cursor blink / hint rotation every ~2.5 s.
+        assert!(!is_busy(&slots(&[0, 10, 20, 30]), 30));
+        // A one-off redraw burst (e.g. after a resize).
+        assert!(!is_busy(&slots(&[29, 30]), 30));
+    }
+
+    #[test]
+    fn goes_idle_after_output_stops() {
+        let s = slots(&[10, 11, 12, 13, 14, 15]);
+        assert!(is_busy(&s, 15));
+        assert!(!is_busy(&s, 22));
+    }
+
+    #[test]
+    fn repeated_output_in_one_slot_counts_once() {
+        assert_eq!(slots(&[5, 5, 5, 6]).len(), 2);
     }
 }

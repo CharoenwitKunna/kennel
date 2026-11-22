@@ -268,3 +268,75 @@ fn live_color_probe() {
         sess.kill();
     }
 }
+
+#[test]
+#[ignore]
+fn live_idle_probe() {
+    // How does an idle TUI (waiting for input) look to our activity detector?
+    crate::term::scrub_parent_session_env();
+    let mut a = Agent::new(9004, "idle".into(), Provider::Claude);
+    a.cwd = work_dir().to_string_lossy().into();
+    a.model = "haiku".into();
+    let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    wait_for(&sess, &["trust", "\u{276f}"], 20);
+    std::thread::sleep(Duration::from_secs(3));
+    let mut last = sess.screen_text();
+    for i in 0..12 {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = sess.screen_text();
+        println!("t+{:.1}s quiet_for={:?} screen_changed={}", i as f32 * 0.5, sess.quiet_for(), now != last);
+        last = now;
+    }
+    sess.kill();
+}
+
+/// Number of differing cells between two screen snapshots.
+fn cells_changed(a: &str, b: &str) -> usize {
+    a.lines().zip(b.lines()).map(|(x, y)| x.chars().zip(y.chars()).filter(|(p, q)| p != q).count()).sum()
+}
+
+#[test]
+#[ignore]
+fn live_idle_probe_opencode() {
+    crate::term::scrub_parent_session_env();
+    let a = Agent::new(9005, "idle-oc".into(), Provider::OpenCode);
+    let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    wait_for(&sess, &["Ask anything"], 20);
+    std::thread::sleep(Duration::from_secs(3));
+    let mut last = sess.screen_text();
+    for i in 0..10 {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = sess.screen_text();
+        println!("t+{:.1}s quiet_for={:?} cells_changed={}", i as f32 * 0.5, sess.quiet_for(), cells_changed(&last, &now));
+        last = now;
+    }
+    sess.kill();
+}
+
+#[test]
+#[ignore]
+fn live_busy_probe() {
+    // busy() must be true while Claude works on a prompt and false once it's done.
+    crate::term::scrub_parent_session_env();
+    let mut a = Agent::new(9006, "busy".into(), Provider::Claude);
+    a.cwd = std::env::temp_dir().join("agent-hub-live").to_string_lossy().into(); // already trusted
+    a.model = "haiku".into();
+    let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
+    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    wait_for(&sess, &["\u{276f}"], 20);
+    wait_quiet(&sess, 1500, 10);
+    println!("idle before prompt: busy={}", sess.busy());
+    submit_checked(&sess, "Count from 1 to 40, one number per line, slowly explaining nothing.");
+    let mut samples = Vec::new();
+    for _ in 0..24 {
+        std::thread::sleep(Duration::from_millis(250));
+        samples.push(if sess.busy() { 'B' } else { '.' });
+    }
+    println!("while answering (250ms steps): {}", samples.iter().collect::<String>());
+    wait_quiet(&sess, 2500, 40);
+    std::thread::sleep(Duration::from_secs(1));
+    println!("after answer: busy={}", sess.busy());
+    sess.kill();
+}

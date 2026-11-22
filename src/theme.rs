@@ -5,7 +5,7 @@ use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontF
 use std::sync::Arc;
 
 pub const BG: Color32 = Color32::from_rgb(0x0E, 0x10, 0x14);
-pub const PANEL: Color32 = Color32::from_rgb(0x14, 0x17, 0x1F);
+pub const PANEL: Color32 = Color32::from_rgb(0x17, 0x1A, 0x24);
 pub const RAISED: Color32 = Color32::from_rgb(0x1B, 0x1F, 0x2B);
 pub const HOVER: Color32 = Color32::from_rgb(0x23, 0x28, 0x37);
 pub const BORDER: Color32 = Color32::from_rgb(0x26, 0x2B, 0x3A);
@@ -23,7 +23,7 @@ pub const RED: Color32 = Color32::from_rgb(0xE5, 0x5B, 0x5B);
 pub const GREY: Color32 = Color32::from_rgb(0x6B, 0x72, 0x85);
 
 /// Terminal background (slightly darker than the app background).
-pub const TERM_BG: Color32 = Color32::from_rgb(0x0B, 0x0D, 0x11);
+pub const TERM_BG: Color32 = Color32::from_rgb(0x08, 0x09, 0x0C);
 pub const TERM_FG: Color32 = Color32::from_rgb(0xD8, 0xDC, 0xE6);
 
 /// 16-color ANSI palette (One Dark-ish).

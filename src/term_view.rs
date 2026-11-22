@@ -24,15 +24,23 @@ pub struct TermViewOutput {
 /// `cwd` resolves relative file paths for Ctrl+click.
 pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: f32, cwd: &Path) -> TermViewOutput {
     let font = FontId::monospace(font_size);
-    let (cw, ch) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-    let ch = ch.ceil();
+    // Cell width = the real advance of a long run (text is drawn in runs, so a
+    // single glyph's rounded width would drift and clip the right edge).
+    let (cw, glyph_h) = ui.fonts(|f| {
+        let g = f.layout_no_wrap("M".repeat(100), font.clone(), Color32::WHITE);
+        (g.size().x / 100.0, f.row_height(&font))
+    });
+    let glyph_h = glyph_h.ceil();
     let rect = ui.available_rect_before_wrap();
     let response = ui.interact(rect, id, Sense::click_and_drag());
     ui.allocate_rect(rect, Sense::hover());
 
     let inner = rect.shrink(PAD);
     let cols = ((inner.width() / cw).floor() as usize).max(2);
-    let rows = ((inner.height() / ch).floor() as usize).max(1);
+    let rows = ((inner.height() / glyph_h).floor() as usize).max(1);
+    // Spread rows a hair so they fill the pane: no empty strip at the bottom.
+    let ch = (inner.height() / rows as f32).max(glyph_h);
+    let text_dy = ((ch - glyph_h) / 2.0).floor();
     sess.resize(cols, rows, cw, ch);
 
     if response.clicked() || response.drag_started() || response.secondary_clicked() {
@@ -205,7 +213,7 @@ pub fn show(ui: &mut egui::Ui, sess: &mut TermSession, id: egui::Id, font_size: 
         }
     }
 
-    paint(ui, sess, rect, inner, &font, cw, ch, focused);
+    paint(ui, sess, rect, inner, &font, cw, ch, text_dy, focused);
     if let Some((row, c0, c1)) = link {
         let y = inner.top() + (row as f32 + 1.0) * ch - 1.0;
         let x0 = inner.left() + c0 as f32 * cw;
@@ -299,7 +307,7 @@ fn open_target(target: &str) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &FontId, cw: f32, ch: f32, focused: bool) {
+fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &FontId, cw: f32, ch: f32, text_dy: f32, focused: bool) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::TERM_BG);
     // Cell backgrounds are collected and placed in this slot so they sit under all text.
@@ -338,9 +346,10 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
                 return;
             }
             let p = pos_of(r.row, r.col);
-            painter.text(p, Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
+            let tp = p + Vec2::new(0.0, text_dy);
+            painter.text(tp, Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
             if r.bold {
-                painter.text(p + Vec2::new(BOLD_SHIFT, 0.0), Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
+                painter.text(tp + Vec2::new(BOLD_SHIFT, 0.0), Align2::LEFT_TOP, &r.text, font.clone(), r.fg);
             }
             let w = r.text.chars().count() as f32 * cw;
             if r.underline {
@@ -449,7 +458,7 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
             }
             let p = pos_of(row, col);
             // Center the glyph in its cell(s); fallback fonts may be wider/narrower.
-            let center = Pos2::new(p.x + width as f32 * cw / 2.0, p.y);
+            let center = Pos2::new(p.x + width as f32 * cw / 2.0, p.y + text_dy);
             if bold {
                 painter.text(center + Vec2::new(BOLD_SHIFT, 0.0), Align2::CENTER_TOP, &s, font.clone(), fg);
             }

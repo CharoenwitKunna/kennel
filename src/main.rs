@@ -32,7 +32,9 @@ fn main() -> eframe::Result {
             .with_title("Kennel")
             .with_icon(egui::IconData { rgba: icon::icon_rgba(64), width: 64, height: 64 })
             .with_inner_size([1040.0, 620.0])
-            .with_min_inner_size([720.0, 440.0]),
+            .with_min_inner_size([720.0, 440.0])
+            // Our toolbar is the title bar (drag, double-click, window buttons).
+            .with_decorations(false),
         renderer: eframe::Renderer::Glow,
         vsync: true,
         ..Default::default()
@@ -563,8 +565,17 @@ impl App {
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
             .exact_height(32.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin::symmetric(6, 0)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin { left: 6, right: 0, top: 0, bottom: 0 }).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
+                // Empty toolbar space acts as the title bar. Registered first so
+                // the buttons drawn on top keep their clicks.
+                let bar = ui.interact(ui.max_rect(), egui::Id::new("titlebar"), Sense::click_and_drag());
+                let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                if bar.double_clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                } else if bar.drag_started_by(egui::PointerButton::Primary) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
                 ui.horizontal_centered(|ui| {
                     let tip = if self.state.settings.sidebar_hidden { "Show sidebar (Ctrl+Shift+B)" } else { "Hide sidebar (Ctrl+Shift+B)" };
                     if ui.add(icon_button("☰")).on_hover_text(tip).clicked() {
@@ -576,6 +587,19 @@ impl App {
                     ui.add_space(8.0);
                     segmented(ui, &mut self.view);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if window_button(ui, WinBtn::Close).on_hover_text("Close").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let (kind, tip) = if maximized { (WinBtn::Restore, "Restore") } else { (WinBtn::Maximize, "Maximize") };
+                        if window_button(ui, kind).on_hover_text(tip).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
+                        if window_button(ui, WinBtn::Minimize).on_hover_text("Minimize").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                        ui.add_space(8.0);
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         let resp = ui.add(primary_button("+  New agent")).on_hover_text("Ctrl+Shift+N");
                         let popup_id = egui::Id::new("new_agent_menu");
                         if resp.clicked() || std::mem::take(&mut self.open_new_menu) {
@@ -593,7 +617,7 @@ impl App {
                                 }
                             },
                         );
-                        if ui.add(ghost_button("⚙")).on_hover_text("Settings").clicked() {
+                        if ui.add(icon_button("⚙")).on_hover_text("Settings").clicked() {
                             self.show_settings = !self.show_settings;
                         }
                         let running = self.state.agents.iter().filter(|a| self.status(a.id).alive()).count();
@@ -715,9 +739,10 @@ impl App {
             .fill(if selected { RAISED } else { PANEL })
             .stroke(Stroke::new(1.0_f32, if selected { Color32::from_rgb(0x34, 0x3B, 0x50) } else { Color32::TRANSPARENT }))
             .corner_radius(5)
-            .inner_margin(Margin::symmetric(6, 2))
+            .inner_margin(Margin::symmetric(6, 3))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
                 ui.horizontal(|ui| {
                     ui.set_height(18.0);
                     ui.spacing_mut().item_spacing.x = 5.0;
@@ -739,6 +764,16 @@ impl App {
                         });
                     });
                 });
+                if !renaming {
+                    ui.horizontal(|ui| {
+                        ui.add_space(19.0); // under the name, past the icon
+                        ui.add(
+                            egui::Label::new(RichText::new(card_subtitle(a)).size(10.5).color(FAINT))
+                                .truncate()
+                                .selectable(false),
+                        );
+                    });
+                }
             });
         let rect = inner.response.rect;
         if renaming {
@@ -812,7 +847,22 @@ impl App {
     }
 
     fn focus_view(&mut self, ui: &mut egui::Ui) {
-        self.tab_strip(ui);
+        // One row: tabs on the left; the open agent's stats and buttons on the right.
+        let current = self.selected.and_then(|id| self.state.agent(id).cloned());
+        ui.horizontal(|ui| {
+            ui.set_height(24.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if let Some(a) = &current {
+                    let context = self.live.get(&a.id).and_then(|l| l.claude.as_ref()).and_then(|t| t.context_pct);
+                    self.pane_controls(ui, a, self.status(a.id), false);
+                    ui.add_space(6.0);
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    pane_stats(ui, a, context, true);
+                    ui.add_space(8.0);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| self.tab_strip(ui));
+            });
+        });
         ui.add_space(2.0);
         let Some(id) = self.selected.filter(|id| self.state.agent(*id).is_some()) else {
             ui.centered_and_justified(|ui| ui.label(RichText::new("Select an agent").color(MUTED)));
@@ -836,15 +886,18 @@ impl App {
                         let unread = if selected { 0 } else { self.unread(a.id) };
                         let attention = self.attention.contains(&a.id);
                         let age = self.status_age(a.id);
+                        let renaming = self.renaming.as_ref().is_some_and(|(rid, _)| *rid == a.id);
                         let inner = egui::Frame::new()
-                            .fill(if selected { PANEL } else { Color32::TRANSPARENT })
-                            .stroke(Stroke::new(1.0_f32, if selected { BORDER } else { Color32::TRANSPARENT }))
                             .corner_radius(CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 })
                             .inner_margin(Margin { left: 8, right: 8, top: 3, bottom: 3 })
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 5.0;
                                     app_icon(ui, a.provider, 12.0);
+                                    if renaming {
+                                        self.rename_box(ui, a.id, 12.0, 140.0);
+                                        return;
+                                    }
                                     let color = if selected { TEXT } else { MUTED };
                                     ui.add(egui::Label::new(RichText::new(&a.name).font(bold(12.0)).color(color)).selectable(false));
                                     status_indicator(ui, status, false, age);
@@ -856,7 +909,13 @@ impl App {
                                 });
                             });
                         let rect = inner.response.rect;
+                        if renaming {
+                            continue;
+                        }
                         let resp = ui.interact(rect, egui::Id::new(("tab", a.id)), Sense::click());
+                        if resp.double_clicked() {
+                            self.begin_rename(a.id);
+                        }
                         if selected {
                             let y = rect.bottom() - 1.0;
                             ui.painter().line_segment(
@@ -872,7 +931,7 @@ impl App {
                         if resp.middle_clicked() && status.alive() {
                             self.actions.push(Action::Stop(a.id));
                         }
-                        resp.on_hover_text(agent_info(a));
+                        resp.on_hover_text(format!("{}\n\nDouble-click to rename · middle-click to stop", agent_info(a)));
                     }
                 });
             });
@@ -944,7 +1003,66 @@ impl App {
         }
     }
 
-    /// One agent: a slim title row on top of its terminal. Used by both views.
+    /// Stop/start, maximize/back and the ⋯ menu, laid out right to left.
+    fn pane_controls(&mut self, ui: &mut egui::Ui, a: &Agent, status: Status, in_grid: bool) {
+        let id = a.id;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let more = ui.add(icon_button("⋯")).on_hover_text("More");
+        let menu_id = egui::Id::new(("pane_menu", id));
+        if more.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(menu_id));
+        }
+        egui::popup_below_widget(ui, menu_id, &more, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(160.0);
+            if ui.button("Rename").clicked() {
+                self.begin_rename(id);
+                ui.close_menu();
+            }
+            if status.alive() && ui.button("Restart").clicked() {
+                self.actions.push(Action::Restart(id));
+                ui.close_menu();
+            }
+            if ui.button("Edit…").clicked() {
+                self.actions.push(Action::Edit(id));
+                ui.close_menu();
+            }
+            if ui.button("New session").clicked() {
+                self.actions.push(Action::NewSession(id));
+                ui.close_menu();
+            }
+            if ui.button("Copy session id").clicked() {
+                if let Some(s) = &a.session_id {
+                    ui.ctx().copy_text(s.clone());
+                }
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button(RichText::new("Delete…").color(RED)).clicked() {
+                self.actions.push(Action::Delete(id));
+                ui.close_menu();
+            }
+        });
+        let (icon, tip) = if in_grid { ("⤢", "Maximize (or double-click the title)") } else { ("⤡", "Back to grid") };
+        if ui.add(icon_button(icon)).on_hover_text(tip).clicked() {
+            if in_grid {
+                self.actions.push(Action::OpenFocus(id));
+            } else {
+                self.view = View::Grid;
+            }
+        }
+        if status.alive() {
+            if ui.add(icon_button("■")).on_hover_text("Stop").clicked() {
+                self.actions.push(Action::Stop(id));
+            }
+        } else {
+            let tip = if a.session_id.is_some() { "Resume" } else { "Start" };
+            if ui.add(icon_button("▶")).on_hover_text(tip).clicked() {
+                self.actions.push(Action::Start(id));
+            }
+        }
+    }
+
+    /// One agent: a slim title row (grid only) on top of its terminal.
     fn agent_pane(&mut self, ui: &mut egui::Ui, id: u64, in_grid: bool) {
         let Some(a) = self.state.agent(id).cloned() else { return };
         let status = self.status(id);
@@ -965,92 +1083,29 @@ impl App {
             .inner_margin(Margin::same(2))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                // Empty space in the title row: double-click to maximize / restore.
-                let title_rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 22.0));
-                let title_bg = ui.interact(title_rect, egui::Id::new(("title", id)), Sense::click());
-                if title_bg.double_clicked() {
-                    if in_grid {
+                // In Focus view the tab strip carries the name, stats and buttons.
+                if in_grid {
+                    // Empty space in the title row: double-click to maximize.
+                    let title_rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 22.0));
+                    let title_bg = ui.interact(title_rect, egui::Id::new(("title", id)), Sense::click());
+                    if title_bg.double_clicked() {
                         self.actions.push(Action::OpenFocus(id));
-                    } else {
-                        self.view = View::Grid;
                     }
-                }
-                ui.horizontal(|ui| {
-                    ui.set_height(22.0);
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    ui.add_space(3.0);
-                    app_icon(ui, a.provider, 14.0);
-                    self.name_widget(ui, &a, 12.5);
-                    status_indicator(ui, status, true, age);
-                    // Stats grouped in one muted cluster: "12.3k tok · ctx 34%".
-                    ui.spacing_mut().item_spacing.x = 3.0;
-                    ui.label(RichText::new("·").small().color(FAINT));
-                    let u = a.session_usage;
-                    ui.label(
-                        RichText::new(format!("{} tok", fmt_tokens(u.total_tokens()))).small().color(FAINT),
-                    );
-                    if let Some(p) = context {
+                    ui.horizontal(|ui| {
+                        ui.set_height(22.0);
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.add_space(3.0);
+                        app_icon(ui, a.provider, 14.0);
+                        self.name_widget(ui, &a, 12.5);
+                        status_indicator(ui, status, true, age);
+                        ui.spacing_mut().item_spacing.x = 3.0;
                         ui.label(RichText::new("·").small().color(FAINT));
-                        ui.label(RichText::new(format!("ctx {p:.0}%")).small().color(context_color(p)))
-                            .on_hover_text("How full this conversation's context window is");
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        let more = ui.add(icon_button("⋯")).on_hover_text("More");
-                        let menu_id = egui::Id::new(("pane_menu", id));
-                        if more.clicked() {
-                            ui.memory_mut(|m| m.toggle_popup(menu_id));
-                        }
-                        egui::popup_below_widget(ui, menu_id, &more, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-                            ui.set_min_width(160.0);
-                            if ui.button("Rename").clicked() {
-                                self.begin_rename(id);
-                                ui.close_menu();
-                            }
-                            if status.alive() && ui.button("Restart").clicked() {
-                                self.actions.push(Action::Restart(id));
-                                ui.close_menu();
-                            }
-                            if ui.button("Edit…").clicked() {
-                                self.actions.push(Action::Edit(id));
-                                ui.close_menu();
-                            }
-                            if ui.button("New session").clicked() {
-                                self.actions.push(Action::NewSession(id));
-                                ui.close_menu();
-                            }
-                            if ui.button("Copy session id").clicked() {
-                                if let Some(s) = &a.session_id {
-                                    ui.ctx().copy_text(s.clone());
-                                }
-                                ui.close_menu();
-                            }
-                            ui.separator();
-                            if ui.button(RichText::new("Delete…").color(RED)).clicked() {
-                                self.actions.push(Action::Delete(id));
-                                ui.close_menu();
-                            }
+                        pane_stats(ui, &a, context, false);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            self.pane_controls(ui, &a, status, true);
                         });
-                        let (icon, tip) = if in_grid { ("⤢", "Maximize (or double-click the title)") } else { ("⤡", "Back to grid (or double-click the title)") };
-                        if ui.add(icon_button(icon)).on_hover_text(tip).clicked() {
-                            if in_grid {
-                                self.actions.push(Action::OpenFocus(id));
-                            } else {
-                                self.view = View::Grid;
-                            }
-                        }
-                        if status.alive() {
-                            if ui.add(icon_button("■")).on_hover_text("Stop").clicked() {
-                                self.actions.push(Action::Stop(id));
-                            }
-                        } else {
-                            let tip = if a.session_id.is_some() { "Resume" } else { "Start" };
-                            if ui.add(icon_button("▶")).on_hover_text(tip).clicked() {
-                                self.actions.push(Action::Start(id));
-                            }
-                        }
                     });
-                });
+                }
                 if let Some(p) = context {
                     // Thin context gauge under the title.
                     let (bar, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 2.0), Sense::hover());
@@ -1508,6 +1563,7 @@ impl eframe::App for App {
         self.settings_window(ctx);
         self.delete_window(ctx);
         self.toasts(ctx);
+        window_edges(ctx);
         self.apply_actions(ctx);
         self.maybe_save(false);
         if !self.live.is_empty() {
@@ -1642,6 +1698,84 @@ fn danger_button(text: &str) -> Btn {
 
 fn icon_button(text: &str) -> Btn {
     Btn { text: text.into(), kind: BtnKind::Icon }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum WinBtn {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+/// Title-bar window button, full toolbar height, drawn as crisp shapes.
+fn window_button(ui: &mut egui::Ui, kind: WinBtn) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(42.0, ui.available_height()), Sense::click());
+    let t = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.10);
+    let hot = if kind == WinBtn::Close { Color32::from_rgb(0xC4, 0x2B, 0x1C) } else { HOVER };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, lerp_color(Color32::TRANSPARENT, hot, t));
+    let fg = lerp_color(MUTED, Color32::WHITE, t);
+    let s = Stroke::new(1.0_f32, fg);
+    let c = rect.center();
+    let h = 5.0;
+    match kind {
+        WinBtn::Minimize => {
+            painter.hline(c.x - h..=c.x + h, c.y + 0.5, s);
+        }
+        WinBtn::Maximize => {
+            painter.rect_stroke(egui::Rect::from_center_size(c, Vec2::splat(2.0 * h)), 1.0, s, egui::StrokeKind::Inside);
+        }
+        WinBtn::Restore => {
+            let back = egui::Rect::from_center_size(c + Vec2::new(2.0, -2.0), Vec2::splat(2.0 * h - 2.0));
+            let front = egui::Rect::from_center_size(c + Vec2::new(-1.0, 1.0), Vec2::splat(2.0 * h - 2.0));
+            painter.rect_stroke(back, 1.0, s, egui::StrokeKind::Inside);
+            painter.rect_filled(front, 1.0, PANEL.gamma_multiply(1.0 - t));
+            painter.rect_stroke(front, 1.0, s, egui::StrokeKind::Inside);
+        }
+        WinBtn::Close => {
+            painter.line_segment([c + Vec2::new(-h, -h), c + Vec2::new(h, h)], s);
+            painter.line_segment([c + Vec2::new(-h, h), c + Vec2::new(h, -h)], s);
+        }
+    }
+    resp
+}
+
+/// Without native decorations, resize from a thin band along the window edges.
+fn window_edges(ctx: &egui::Context) {
+    use egui::{CursorIcon as C, ResizeDirection as D};
+    let (maximized, pos, pressed) =
+        ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.pointer.hover_pos(), i.pointer.primary_pressed()));
+    let screen = ctx.screen_rect();
+    if !maximized {
+        // Hairline so the window edge is visible on any background.
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("frame")))
+            .rect_stroke(screen, 0.0, Stroke::new(1.0_f32, BORDER), egui::StrokeKind::Inside);
+    }
+    let Some(p) = pos else { return };
+    if maximized {
+        return;
+    }
+    const EDGE: f32 = 5.0;
+    let (l, r) = (p.x - screen.left() < EDGE, screen.right() - p.x < EDGE);
+    let (t, b) = (p.y - screen.top() < EDGE, screen.bottom() - p.y < EDGE);
+    let dir = match (l, r, t, b) {
+        (true, _, true, _) => Some((D::NorthWest, C::ResizeNorthWest)),
+        (_, true, true, _) => Some((D::NorthEast, C::ResizeNorthEast)),
+        (true, _, _, true) => Some((D::SouthWest, C::ResizeSouthWest)),
+        (_, true, _, true) => Some((D::SouthEast, C::ResizeSouthEast)),
+        (true, ..) => Some((D::West, C::ResizeWest)),
+        (_, true, ..) => Some((D::East, C::ResizeEast)),
+        (_, _, true, _) => Some((D::North, C::ResizeNorth)),
+        (.., true) => Some((D::South, C::ResizeSouth)),
+        _ => None,
+    };
+    if let Some((d, cursor)) = dir {
+        ctx.set_cursor_icon(cursor);
+        if pressed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(d));
+        }
+    }
 }
 
 /// Status as a dot (plus label if `label`), or a small pulse while working.
@@ -1878,6 +2012,43 @@ fn resize_pair(fracs: &mut [f32], i: usize, delta: f32) {
     let a = (fracs[i] + delta).clamp(MIN, (total - MIN).max(MIN));
     fracs[i] = a;
     fracs[i + 1] = total - a;
+}
+
+/// "12.3k tok · ctx 34%", in reading order whichever way the layout runs.
+fn pane_stats(ui: &mut egui::Ui, a: &Agent, context: Option<f32>, rtl: bool) {
+    let mut items = vec![(RichText::new(format!("{} tok", fmt_tokens(a.session_usage.total_tokens()))).small().color(FAINT), None)];
+    if let Some(p) = context {
+        items.push((RichText::new("·").small().color(FAINT), None));
+        items.push((
+            RichText::new(format!("ctx {p:.0}%")).small().color(context_color(p)),
+            Some("How full this conversation's context window is"),
+        ));
+    }
+    if rtl {
+        items.reverse();
+    }
+    for (text, tip) in items {
+        let r = ui.add(egui::Label::new(text).selectable(false));
+        if let Some(t) = tip {
+            r.on_hover_text(t);
+        }
+    }
+}
+
+/// Second line of a sidebar card: "folder · model".
+fn card_subtitle(a: &Agent) -> String {
+    let cwd = a.cwd.trim().trim_end_matches(['\\', '/']);
+    let folder = if cwd.is_empty() {
+        "~".to_string()
+    } else {
+        std::path::Path::new(cwd).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| cwd.to_string())
+    };
+    let model = match a.provider {
+        Provider::Claude if a.model.trim().is_empty() => "default model",
+        Provider::Claude => a.model.trim(),
+        Provider::OpenCode => "OpenCode",
+    };
+    format!("{folder} · {model}")
 }
 
 fn context_color(pct: f32) -> Color32 {

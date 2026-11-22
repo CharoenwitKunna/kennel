@@ -600,16 +600,15 @@ impl App {
                         ui.painter().circle_filled(r.center(), 3.5, AMBER);
                     }
                 });
-                if !renaming {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        status_dot(ui, status);
-                        ui.label(RichText::new(status.label()).small().color(status.color()));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new(format!("${:.3}", a.total_usage().cost_usd)).small().color(MUTED));
-                        });
+                // Keep this row while renaming so the card keeps its size.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    status_dot(ui, status);
+                    ui.label(RichText::new(status.label()).small().color(status.color()));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(format!("${:.3}", a.total_usage().cost_usd)).small().color(MUTED));
                     });
-                }
+                });
             });
         if renaming {
             return None;
@@ -769,7 +768,10 @@ impl App {
     /// Agent name; double-click turns it into a text box.
     fn name_widget(&mut self, ui: &mut egui::Ui, a: &Agent, size: f32) {
         if self.renaming.as_ref().is_some_and(|(id, _)| *id == a.id) {
-            self.rename_box(ui, a.id, size, 200.0);
+            // As wide as the name (plus room to type), so the title doesn't shrink.
+            let name_w = ui.fonts(|f| f.layout_no_wrap(a.name.clone(), bold(size), TEXT).size().x);
+            let width = (name_w + 40.0).clamp(140.0, 320.0).min(ui.available_width() - 120.0);
+            self.rename_box(ui, a.id, size, width);
             return;
         }
         let resp = ui

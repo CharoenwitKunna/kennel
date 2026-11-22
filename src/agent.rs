@@ -120,6 +120,9 @@ pub struct Agent {
     legacy_usage: Usage,
     #[serde(default)]
     pub runs: u32,
+    /// It was running when the app closed; start it again on next launch.
+    #[serde(default)]
+    pub resume_on_launch: bool,
 }
 
 impl Agent {
@@ -137,6 +140,7 @@ impl Agent {
             usage_archived: Usage::default(),
             legacy_usage: Usage::default(),
             runs: 0,
+            resume_on_launch: false,
         }
     }
 

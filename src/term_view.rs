@@ -306,6 +306,19 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
                     run = Some(Run { row, col, fg, underline, strike, text: c.to_string() });
                 }
             }
+        } else if let Some(rects) = zw.is_none().then(|| block_rects(c)).flatten() {
+            // Block elements are drawn as solid shapes so they tile without gaps.
+            flush(&mut run);
+            let cell = Rect::from_min_size(pos_of(row, col), Vec2::new(cw, ch));
+            let (rects, alpha) = rects;
+            let color = if alpha < 1.0 { fg.gamma_multiply(alpha) } else { fg };
+            for (x0, y0, x1, y1) in rects {
+                let r = Rect::from_min_max(
+                    Pos2::new(cell.left() + x0 * cw, cell.top() + y0 * ch),
+                    Pos2::new(cell.left() + x1 * cw, cell.top() + y1 * ch),
+                );
+                painter.rect_filled(r.expand(0.25), 0.0, color);
+            }
         } else {
             flush(&mut run);
             let mut s = c.to_string();
@@ -348,6 +361,50 @@ fn paint(ui: &egui::Ui, sess: &TermSession, rect: Rect, inner: Rect, font: &Font
         painter.galley(r.min + Vec2::new(6.0, 3.0), galley, theme::TEXT);
     }
     let _ = t.grid().total_lines();
+}
+
+type Frac = (f32, f32, f32, f32);
+
+/// Unicode block elements (U+2580..U+259F) as fractional rects of the cell,
+/// plus an opacity for the shade characters.
+fn block_rects(c: char) -> Option<(Vec<Frac>, f32)> {
+    const TL: Frac = (0.0, 0.0, 0.5, 0.5);
+    const TR: Frac = (0.5, 0.0, 1.0, 0.5);
+    const BL: Frac = (0.0, 0.5, 0.5, 1.0);
+    const BR: Frac = (0.5, 0.5, 1.0, 1.0);
+    let full = vec![(0.0, 0.0, 1.0, 1.0)];
+    let r = match c {
+        '\u{2580}' => (vec![(0.0, 0.0, 1.0, 0.5)], 1.0), // ▀
+        '\u{2581}'..='\u{2587}' => {
+            // ▁..▇ lower eighths
+            let n = (c as u32 - 0x2580) as f32;
+            (vec![(0.0, 1.0 - n / 8.0, 1.0, 1.0)], 1.0)
+        }
+        '\u{2588}' => (full, 1.0), // █
+        '\u{2589}'..='\u{258F}' => {
+            // ▉..▏ left eighths
+            let n = (0x2590 - c as u32) as f32;
+            (vec![(0.0, 0.0, n / 8.0, 1.0)], 1.0)
+        }
+        '\u{2590}' => (vec![(0.5, 0.0, 1.0, 1.0)], 1.0), // ▐
+        '\u{2591}' => (full, 0.25),                      // ░
+        '\u{2592}' => (full, 0.5),                       // ▒
+        '\u{2593}' => (full, 0.75),                      // ▓
+        '\u{2594}' => (vec![(0.0, 0.0, 1.0, 0.125)], 1.0), // ▔
+        '\u{2595}' => (vec![(0.875, 0.0, 1.0, 1.0)], 1.0), // ▕
+        '\u{2596}' => (vec![BL], 1.0),
+        '\u{2597}' => (vec![BR], 1.0),
+        '\u{2598}' => (vec![TL], 1.0),
+        '\u{2599}' => (vec![TL, BL, BR], 1.0),
+        '\u{259A}' => (vec![TL, BR], 1.0),
+        '\u{259B}' => (vec![TL, TR, BL], 1.0),
+        '\u{259C}' => (vec![TL, TR, BR], 1.0),
+        '\u{259D}' => (vec![TR], 1.0),
+        '\u{259E}' => (vec![TR, BL], 1.0),
+        '\u{259F}' => (vec![TR, BL, BR], 1.0),
+        _ => return None,
+    };
+    Some(r)
 }
 
 fn resolve(c: Color, colors: &Colors, bold: bool) -> Color32 {
@@ -484,5 +541,23 @@ mod tests {
         assert_eq!(key_bytes(Key::A, none, false), None);
         assert_eq!(key_bytes(Key::Delete, none, false), Some(b"\x1b[3~".to_vec()));
         assert_eq!(key_bytes(Key::Backspace, none, false), Some(vec![0x7f]));
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::block_rects;
+
+    #[test]
+    fn blocks() {
+        assert_eq!(block_rects('█').unwrap().0, vec![(0.0, 0.0, 1.0, 1.0)]);
+        assert_eq!(block_rects('▀').unwrap().0, vec![(0.0, 0.0, 1.0, 0.5)]);
+        assert_eq!(block_rects('▄').unwrap().0, vec![(0.0, 0.5, 1.0, 1.0)]);
+        assert_eq!(block_rects('▌').unwrap().0, vec![(0.0, 0.0, 0.5, 1.0)]);
+        assert_eq!(block_rects('▁').unwrap().0, vec![(0.0, 0.875, 1.0, 1.0)]);
+        assert_eq!(block_rects('▏').unwrap().0, vec![(0.0, 0.0, 0.125, 1.0)]);
+        assert_eq!(block_rects('▒').unwrap().1, 0.5);
+        assert!(block_rects('a').is_none());
+        assert!(block_rects('─').is_none());
     }
 }

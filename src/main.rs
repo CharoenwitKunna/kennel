@@ -29,8 +29,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Agent Hub")
-            .with_inner_size([1180.0, 720.0])
-            .with_min_inner_size([760.0, 460.0]),
+            .with_inner_size([1040.0, 620.0])
+            .with_min_inner_size([720.0, 440.0]),
         renderer: eframe::Renderer::Glow,
         vsync: true,
         ..Default::default()
@@ -87,6 +87,8 @@ const QUIET: Duration = Duration::from_millis(1500);
 struct Live {
     sess: TermSession,
     was_working: bool,
+    /// The user has typed into or broadcast to this agent (gates "needs you").
+    interacted: bool,
     claude: Option<ClaudeTracker>,
     last_poll: Instant,
     poll_inflight: bool,
@@ -151,6 +153,8 @@ struct App {
     self_exe: PathBuf,
     mem: (Instant, Option<u64>),
     focus_term: Option<u64>,
+    /// Agents flagged `resume_on_launch` have been started.
+    autostarted: bool,
     toasts: Vec<(Instant, String)>,
     actions: Vec<Action>,
 }
@@ -184,6 +188,7 @@ impl App {
             self_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-hub.exe")),
             mem: (Instant::now() - Duration::from_secs(10), None),
             focus_term: None,
+            autostarted: false,
             toasts: Vec::new(),
             actions: Vec::new(),
         }
@@ -231,6 +236,7 @@ impl App {
             Live {
                 sess,
                 was_working: false,
+                interacted: false,
                 claude,
                 last_poll: Instant::now(),
                 poll_inflight: false,
@@ -318,7 +324,7 @@ impl App {
             if exited {
                 l.final_polled = true;
             }
-            if (finished_turn || bell || exited) && !focused {
+            if ((finished_turn && l.interacted) || bell || exited) && !focused {
                 self.attention.insert(id);
             }
             if focused {
@@ -631,8 +637,9 @@ impl App {
                                     let text = std::mem::take(&mut self.broadcast);
                                     for (id, _, _) in &targets {
                                         if !self.broadcast_off.contains(id) {
-                                            if let Some(l) = self.live.get(id) {
+                                            if let Some(l) = self.live.get_mut(id) {
                                                 l.sess.submit(text.trim());
+                                                l.interacted = true;
                                             }
                                         }
                                     }
@@ -809,6 +816,9 @@ impl App {
                 self.focus_term = None;
             }
             let out = term_view::show(ui, &mut l.sess, term_id(id), font_size);
+            if out.typed {
+                l.interacted = true;
+            }
             if out.typed || out.response.clicked() {
                 self.attention.remove(&id);
                 if self.selected != Some(id) {
@@ -1162,6 +1172,16 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.autostarted {
+            self.autostarted = true;
+            let ids: Vec<u64> = self.state.agents.iter().filter(|a| a.resume_on_launch).map(|a| a.id).collect();
+            if ids.len() > 1 {
+                self.view = View::Grid;
+            }
+            for id in ids {
+                self.actions.push(Action::Start(id));
+            }
+        }
         self.tick(ctx);
         self.shortcuts(ctx);
         self.toolbar(ctx);
@@ -1185,6 +1205,11 @@ impl eframe::App for App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Remember which agents were running so the next launch brings them back.
+        let alive: HashSet<u64> = self.live.keys().copied().filter(|id| self.status(*id).alive()).collect();
+        for a in &mut self.state.agents {
+            a.resume_on_launch = alive.contains(&a.id);
+        }
         let ids: Vec<u64> = self.live.keys().copied().collect();
         for id in ids {
             self.stop(id);

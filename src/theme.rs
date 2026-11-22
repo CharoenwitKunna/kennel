@@ -28,10 +28,22 @@ pub const TERM_FG: Color32 = Color32::from_rgb(0xD8, 0xDC, 0xE6);
 
 /// 16-color ANSI palette (One Dark-ish).
 const ANSI: [[u8; 3]; 16] = [
-    [0x1C, 0x1F, 0x26], [0xE0, 0x6C, 0x75], [0x98, 0xC3, 0x79], [0xE5, 0xC0, 0x7B],
-    [0x61, 0xAF, 0xEF], [0xC6, 0x78, 0xDD], [0x56, 0xB6, 0xC2], [0xAB, 0xB2, 0xBF],
-    [0x5C, 0x63, 0x70], [0xF0, 0x7F, 0x88], [0xB5, 0xE0, 0x90], [0xF5, 0xD0, 0x8C],
-    [0x7C, 0xC4, 0xFF], [0xDA, 0x8E, 0xF0], [0x6F, 0xD3, 0xDE], [0xF0, 0xF2, 0xF5],
+    [0x1C, 0x1F, 0x26],
+    [0xE0, 0x6C, 0x75],
+    [0x98, 0xC3, 0x79],
+    [0xE5, 0xC0, 0x7B],
+    [0x61, 0xAF, 0xEF],
+    [0xC6, 0x78, 0xDD],
+    [0x56, 0xB6, 0xC2],
+    [0xAB, 0xB2, 0xBF],
+    [0x5C, 0x63, 0x70],
+    [0xF0, 0x7F, 0x88],
+    [0xB5, 0xE0, 0x90],
+    [0xF5, 0xD0, 0x8C],
+    [0x7C, 0xC4, 0xFF],
+    [0xDA, 0x8E, 0xF0],
+    [0x6F, 0xD3, 0xDE],
+    [0xF0, 0xF2, 0xF5],
 ];
 
 pub const BOLD: &str = "ui-bold";
@@ -57,12 +69,12 @@ pub fn term_color(idx: usize) -> Color32 {
             let v = (8 + 10 * (idx - 232)) as u8;
             Color32::from_gray(v)
         }
-        256 => TERM_FG,                                // Foreground
-        257 => TERM_BG,                                // Background
-        258 => TERM_FG,                                // Cursor
-        259..=266 => dim(term_color(idx - 259)),       // Dim colors
-        267 => Color32::WHITE,                         // BrightForeground
-        268 => dim(TERM_FG),                           // DimForeground
+        256 => TERM_FG,                          // Foreground
+        257 => TERM_BG,                          // Background
+        258 => TERM_FG,                          // Cursor
+        259..=266 => dim(term_color(idx - 259)), // Dim colors
+        267 => Color32::WHITE,                   // BrightForeground
+        268 => dim(TERM_FG),                     // DimForeground
         _ => TERM_FG,
     }
 }
@@ -107,11 +119,8 @@ pub fn install_fonts(ctx: &egui::Context, thai: bool) {
     let sym = add("sym", &["seguisym.ttf"]);
     let thai = thai && add("thai", &["LeelawUI.ttf"]);
 
-    let fallbacks: Vec<String> = [(sym, "sym"), (thai, "thai")]
-        .iter()
-        .filter(|(ok, _)| *ok)
-        .map(|(_, n)| n.to_string())
-        .collect();
+    let fallbacks: Vec<String> =
+        [(sym, "sym"), (thai, "thai")].iter().filter(|(ok, _)| *ok).map(|(_, n)| n.to_string()).collect();
 
     let prop = fonts.families.entry(FontFamily::Proportional).or_default();
     if ui {
@@ -165,8 +174,10 @@ pub fn apply_style(ctx: &egui::Context) {
     v.window_corner_radius = CornerRadius::same(12);
     v.menu_corner_radius = CornerRadius::same(8);
     v.window_stroke = Stroke::new(1.0_f32, BORDER);
-    v.window_shadow = egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(140) };
-    v.popup_shadow = egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(120) };
+    v.window_shadow =
+        egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(140) };
+    v.popup_shadow =
+        egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(120) };
     v.selection.bg_fill = ACCENT.gamma_multiply(0.45);
     v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
     v.text_cursor.stroke = Stroke::new(2.0_f32, ACCENT);

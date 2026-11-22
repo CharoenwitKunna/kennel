@@ -7,36 +7,108 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push to the same branch/PR cancels the older run. Tag runs (releases)
+# always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 permissions:
-  contents: write # needed to attach the exe to a GitHub Release on tags
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  lint:
+    name: Format & lint
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
 
+  build:
+    name: Test & build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       # Caches ~/.cargo and target/ so dependency builds happen once, not every run.
       - uses: Swatinem/rust-cache@v2
 
       # Unit tests only. Live tests (#[ignore]) drive real logged-in Claude Code /
       # OpenCode CLIs and are run locally with `cargo build && cargo live`.
       - name: Unit tests
-        run: cargo test
+        run: cargo test --locked
 
       - name: Release build
-        run: cargo build --release
+        run: cargo build --release --locked
+
+      # The exe starts and answers as Claude's status-line helper (what every
+      # Claude agent runs), without opening a window. It's a GUI-subsystem exe,
+      # so wait for it explicitly and redirect through files.
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          '{"model":{"display_name":"SmokeModel"}}' | Out-File -Encoding ascii -NoNewline smoke-in.json
+          $p = Start-Process ./target/release/kennel.exe -ArgumentList '--statusline', '0' -Wait -PassThru -NoNewWindow `
+            -RedirectStandardInput smoke-in.json -RedirectStandardOutput smoke-out.txt
+          $out = Get-Content -Raw smoke-out.txt
+          if ($p.ExitCode -ne 0 -or "$out" -notmatch 'SmokeModel') { Write-Error "exit $($p.ExitCode), output: $out"; exit 1 }
+          "smoke ok: $out"
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash target/release/kennel.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  kennel.exe" | Out-File -Encoding ascii -NoNewline target/release/kennel.exe.sha256
 
       - name: Upload exe
         uses: actions/upload-artifact@v4
         with:
           name: kennel-windows
-          path: target/release/kennel.exe
+          path: |
+            target/release/kennel.exe
+            target/release/kennel.exe.sha256
+          if-no-files-found: error
 
-      - name: Attach to release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  # On a v* tag: publish a GitHub Release, which the in-app updater picks up.
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The updater compares the release tag with the version built into the
+      # exe; if they differ it would offer the same update forever.
+      - name: Tag matches Cargo.toml version
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml version $v"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
         with:
-          files: target/release/kennel.exe
+          name: kennel-windows
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/kennel.exe
+            dist/kennel.exe.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

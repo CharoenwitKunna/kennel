@@ -41,8 +41,18 @@ token/context tracking, and persistent sessions and layout.
 
 ## Download
 
-Every push to `main` builds `kennel.exe` on GitHub Actions. It's under
-*Actions → latest run → Artifacts*, and on the Releases page for `v*` tags.
+Get `kennel.exe` from the [Releases page](https://github.com/CharoenwitKunna/kennel/releases/latest).
+Kennel checks for new releases itself and offers a one-click update (Settings → Updates).
+Every push to `main` also builds an exe under *Actions → latest run → Artifacts*.
+
+## CI and releases
+
+- **CI** (every push and PR): `rustfmt` and `clippy -D warnings`, unit tests, a release build,
+  and a smoke test of the exe.
+- **Releasing**: *Actions → Release → Run workflow* (or `gh workflow run release.yml -f bump=patch`)
+  bumps the version, tags it, and CI publishes the release with `kennel.exe` and its SHA-256.
+  Pushing a `v*` tag by hand works too, as long as it matches the version in `Cargo.toml`.
+- **Dependabot** opens weekly PRs for crate and GitHub Actions updates.
 
 ## Build locally
 

@@ -46,10 +46,7 @@ fn check_candidate(p: &Path) -> Option<PathBuf> {
     if !p.is_file() {
         return None;
     }
-    let is_cmd = p
-        .extension()
-        .map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
-        .unwrap_or(false);
+    let is_cmd = p.extension().map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat")).unwrap_or(false);
     if is_cmd {
         parse_cmd_shim(p)
     } else {
@@ -206,6 +203,11 @@ fn write_claude_settings(agent_id: u64, self_exe: &Path) -> std::io::Result<Path
             // cmd, and a bare space-free path is the only form all three accept.
             "command": format!("{exe} --statusline {agent_id}"),
             "padding": 0
+        },
+        // Fires on startup, /resume, /clear and compaction with the session id
+        // Claude is now writing to, so Kennel resumes the right one next time.
+        "hooks": {
+            "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{exe} --session-hook {agent_id}") }] }]
         }
     });
     let path = dir.join(format!("settings-{agent_id}.json"));
@@ -262,6 +264,26 @@ pub fn live_file(agent_id: u64) -> PathBuf {
     data_dir().join("live").join(format!("{agent_id}.json"))
 }
 
+pub fn session_file(agent_id: u64) -> PathBuf {
+    data_dir().join("live").join(format!("{agent_id}.session.json"))
+}
+
+/// `kennel --session-hook <id>`: Claude's SessionStart hook. Saves which
+/// session the agent is in now. Prints nothing (hook output becomes context).
+pub fn session_hook_main(agent_id: &str) {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let Ok(id) = agent_id.parse::<u64>() else { return };
+    let path = session_file(id);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &input).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
 /// `kennel --statusline <id>`: Claude pipes its status JSON to us; we save it
 /// for the app and print a short status line back for Claude to show.
 pub fn statusline_main(agent_id: &str) {
@@ -302,7 +324,6 @@ mod tests {
         assert_eq!(s.len(), 4 + 12 + 14);
     }
 
-
     #[test]
     fn detects_waiting_prompts() {
         // Captured from Claude Code 2.1.330 (AskUserQuestion menu).
@@ -316,5 +337,4 @@ mod tests {
         let working = "✻ Thinking… (3s · esc to interrupt)";
         assert!(!screen_asks_user(working));
     }
-
 }

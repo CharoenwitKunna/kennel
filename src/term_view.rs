@@ -9,7 +9,9 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
-use eframe::egui::{self, Align2, Color32, EventFilter, FontId, Key, Margin, Modifiers, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, EventFilter, FontId, Key, Margin, Modifiers, Pos2, Rect, Sense, Shape, Stroke, Vec2,
+};
 use std::path::{Path, PathBuf};
 
 const PAD: f32 = 6.0;
@@ -110,7 +112,10 @@ pub fn show(
         (*t.mode(), t.grid().display_offset(), t.grid().history_size())
     };
     let sb_hit_rect = if history_size > 0 {
-        Rect::from_min_max(Pos2::new(rect.right() - 10.0, rect.top() + 4.0), Pos2::new(rect.right(), rect.bottom() - 4.0))
+        Rect::from_min_max(
+            Pos2::new(rect.right() - 10.0, rect.top() + 4.0),
+            Pos2::new(rect.right(), rect.bottom() - 4.0),
+        )
     } else {
         Rect::NOTHING
     };
@@ -271,10 +276,8 @@ pub fn show(
         let dropped: Vec<PathBuf> = i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect();
         (hovered, dropped)
     });
-    let drop_target = ui
-        .input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos()))
-        .is_some_and(|p| rect.contains(p))
-        || single_pane;
+    let drop_target =
+        ui.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos())).is_some_and(|p| rect.contains(p)) || single_pane;
     if !dropped_paths.is_empty() && drop_target {
         let formatted = format_dropped_paths(&dropped_paths);
         if !formatted.is_empty() {
@@ -456,10 +459,8 @@ pub fn show(
             let frac = 1.0 - (cur_off as f32 / history_size as f32);
             let thumb_top = sb_hit_rect.top() + frac * travel;
             let bar_w = if active { 6.0 } else { 3.0 };
-            let thumb = Rect::from_min_size(
-                Pos2::new(rect.right() - bar_w - 2.0, thumb_top),
-                Vec2::new(bar_w, thumb_h),
-            );
+            let thumb =
+                Rect::from_min_size(Pos2::new(rect.right() - bar_w - 2.0, thumb_top), Vec2::new(bar_w, thumb_h));
             let alpha = if active { 0.75 } else { 0.4 };
             painter.rect_filled(thumb, bar_w * 0.5, theme::MUTED.gamma_multiply(alpha));
             if active {
@@ -525,11 +526,8 @@ pub fn show(
                     } else {
                         format!("{}/{}", search.active + 1, search.matches.len())
                     };
-                    let count_col = if !search.query.is_empty() && search.matches.is_empty() {
-                        theme::RED
-                    } else {
-                        theme::MUTED
-                    };
+                    let count_col =
+                        if !search.query.is_empty() && search.matches.is_empty() { theme::RED } else { theme::MUTED };
                     ui.label(egui::RichText::new(count_text).small().color(count_col));
                     if ui.small_button("↑").on_hover_text("Previous (Shift+Enter)").clicked() {
                         search.refresh(sess);
@@ -604,7 +602,8 @@ fn save_pasted_image(w: u32, h: u32, rgba: &[u8]) -> Option<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let week = std::time::Duration::from_secs(7 * 24 * 3600);
         for e in entries.flatten() {
-            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d > week);
+            let old =
+                e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d > week);
             if old {
                 let _ = std::fs::remove_file(e.path());
             }
@@ -741,7 +740,8 @@ fn open_target(target: &str) {
     {
         use std::os::windows::process::CommandExt;
         const NO_WINDOW: u32 = 0x0800_0000;
-        const RUNNABLE: &[&str] = &["exe", "bat", "cmd", "com", "ps1", "vbs", "js", "msi", "lnk", "scr", "pif", "jar", "reg", "hta"];
+        const RUNNABLE: &[&str] =
+            &["exe", "bat", "cmd", "com", "ps1", "vbs", "js", "msi", "lnk", "scr", "pif", "jar", "reg", "hta"];
         let is_url = target.starts_with("http://") || target.starts_with("https://");
         let ext = Path::new(target).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let _ = if !is_url && RUNNABLE.contains(&ext.as_str()) {
@@ -789,7 +789,17 @@ impl Rec<'_> {
 
 /// Build the terminal's picture: background, cell backgrounds, then text.
 #[allow(clippy::too_many_arguments)]
-fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font: &FontId, cw: f32, ch: f32, text_dy: f32, focused: bool) -> Shape {
+fn paint(
+    ctx: &egui::Context,
+    sess: &TermSession,
+    rect: Rect,
+    inner: Rect,
+    font: &FontId,
+    cw: f32,
+    ch: f32,
+    text_dy: f32,
+    focused: bool,
+) -> Shape {
     let painter = Rec { ctx, shapes: Default::default() };
     // Cell backgrounds are collected separately so they sit under all text.
     let bg_shapes = std::cell::RefCell::new(vec![Shape::rect_filled(rect, 0.0, theme::TERM_BG)]);
@@ -930,7 +940,8 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
                 }
                 _ => {
                     flush(&mut run);
-                    run = Some(Run { row, col, cells: 1, ascii: true, fg, bold, underline, strike, text: c.to_string() });
+                    run =
+                        Some(Run { row, col, cells: 1, ascii: true, fg, bold, underline, strike, text: c.to_string() });
                 }
             }
         } else if zw.is_none() && ('\u{2500}'..='\u{257F}').contains(&c) {
@@ -1010,7 +1021,11 @@ fn paint(ctx: &egui::Context, sess: &TermSession, rect: Rect, inner: Rect, font:
                     painter.rect_filled(Rect::from_min_size(p, Vec2::new(2.0, ch)), 0.0, color);
                 }
                 CursorShape::Underline => {
-                    painter.rect_filled(Rect::from_min_size(Pos2::new(p.x, p.y + ch - 2.0), Vec2::new(r.width(), 2.0)), 0.0, color);
+                    painter.rect_filled(
+                        Rect::from_min_size(Pos2::new(p.x, p.y + ch - 2.0), Vec2::new(r.width(), 2.0)),
+                        0.0,
+                        color,
+                    );
                 }
                 _ => {
                     painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.0_f32, color), egui::StrokeKind::Inside);
@@ -1195,9 +1210,15 @@ fn draw_box_drawing(painter: &Rec<'_>, c: char, cell: Rect, fg: Color32) {
         for i in 0..count {
             let start = i as f32 * step + (step - len) * 0.5;
             let r = if horiz {
-                Rect::from_min_max(Pos2::new(cell.left() + start, cy - half), Pos2::new(cell.left() + start + len, cy + half))
+                Rect::from_min_max(
+                    Pos2::new(cell.left() + start, cy - half),
+                    Pos2::new(cell.left() + start + len, cy + half),
+                )
             } else {
-                Rect::from_min_max(Pos2::new(cx - half, cell.top() + start), Pos2::new(cx + half, cell.top() + start + len))
+                Rect::from_min_max(
+                    Pos2::new(cx - half, cell.top() + start),
+                    Pos2::new(cx + half, cell.top() + start + len),
+                )
             };
             painter.rect_filled(r, 0.0, fg);
         }
@@ -1419,10 +1440,10 @@ fn block_rects(c: char) -> Option<(Vec<Frac>, f32)> {
             let n = (0x2590 - c as u32) as f32;
             (vec![(0.0, 0.0, n / 8.0, 1.0)], 1.0)
         }
-        '\u{2590}' => (vec![(0.5, 0.0, 1.0, 1.0)], 1.0), // ▐
-        '\u{2591}' => (full, 0.25),                      // ░
-        '\u{2592}' => (full, 0.5),                       // ▒
-        '\u{2593}' => (full, 0.75),                      // ▓
+        '\u{2590}' => (vec![(0.5, 0.0, 1.0, 1.0)], 1.0),   // ▐
+        '\u{2591}' => (full, 0.25),                        // ░
+        '\u{2592}' => (full, 0.5),                         // ▒
+        '\u{2593}' => (full, 0.75),                        // ▓
         '\u{2594}' => (vec![(0.0, 0.0, 1.0, 0.125)], 1.0), // ▔
         '\u{2595}' => (vec![(0.875, 0.0, 1.0, 1.0)], 1.0), // ▕
         '\u{2596}' => (vec![BL], 1.0),
@@ -1709,7 +1730,7 @@ mod clipboard_tests {
     #[ignore]
     fn clipboard_image_becomes_png_path() {
         let mut cb = arboard::Clipboard::new().unwrap();
-        let px = vec![255u8, 0, 0, 255].repeat(4 * 3);
+        let px = [255u8, 0, 0, 255].repeat(4 * 3);
         cb.set_image(arboard::ImageData { width: 4, height: 3, bytes: px.into() }).unwrap();
         drop(cb);
         let pasted = super::clipboard_attachment().expect("image pasted as a path");

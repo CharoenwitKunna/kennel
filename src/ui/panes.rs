@@ -4,9 +4,9 @@ use crate::*;
 
 impl App {
     pub(crate) fn central(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(4)))
-            .show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(4))).show(
+            ctx,
+            |ui| {
                 let area = ui.max_rect();
                 if self.state.agents.is_empty() {
                     empty_state(ui, &mut self.actions, &mut self.new_folder);
@@ -28,7 +28,8 @@ impl App {
                     ui.painter().rect_filled(area.expand(4.0), 0.0, BG.gamma_multiply(veil));
                     ui.ctx().request_repaint();
                 }
-            });
+            },
+        );
     }
 
     pub(crate) fn focus_view(&mut self, ui: &mut egui::Ui) {
@@ -84,7 +85,10 @@ impl App {
                                         return;
                                     }
                                     let color = if selected { TEXT } else { MUTED };
-                                    ui.add(egui::Label::new(RichText::new(&a.name).font(bold(12.0)).color(color)).selectable(false));
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&a.name).font(bold(12.0)).color(color))
+                                            .selectable(false),
+                                    );
                                     status_indicator(ui, status, false, age);
                                     unread_badge(ui, unread);
                                     if attention && !selected {
@@ -116,7 +120,10 @@ impl App {
                         if resp.middle_clicked() && status.alive() {
                             self.actions.push(Action::Stop(a.id));
                         }
-                        resp.on_hover_text(format!("{}\n\nDouble-click to rename · middle-click to stop", self.info_text(a)));
+                        resp.on_hover_text(format!(
+                            "{}\n\nDouble-click to rename · middle-click to stop",
+                            self.info_text(a)
+                        ));
                     }
                 });
             });
@@ -126,7 +133,9 @@ impl App {
         let ids: Vec<u64> = self.state.agents.iter().map(|a| a.id).filter(|id| self.live.contains_key(id)).collect();
         if ids.is_empty() {
             ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("No agents running. Start some from the sidebar, or use “Start all”.").color(MUTED));
+                ui.label(
+                    RichText::new("No agents running. Start some from the sidebar, or use “Start all”.").color(MUTED),
+                );
             });
             return;
         }
@@ -161,7 +170,9 @@ impl App {
         for c in 0..cols.saturating_sub(1) {
             let x = xs[c + 1] - gap / 2.0;
             let hit = egui::Rect::from_x_y_ranges(x - gap / 2.0..=x + gap / 2.0, area.y_range());
-            let resp = ui.interact(hit, egui::Id::new(("col_div", c)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            let resp = ui
+                .interact(hit, egui::Id::new(("col_div", c)), Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
             if resp.dragged() {
                 resize_pair(&mut self.grid_cols, c, resp.drag_delta().x / avail_w);
             }
@@ -175,7 +186,9 @@ impl App {
         for r in 0..rows.saturating_sub(1) {
             let y = ys[r + 1] - gap / 2.0;
             let hit = egui::Rect::from_x_y_ranges(area.x_range(), y - gap / 2.0..=y + gap / 2.0);
-            let resp = ui.interact(hit, egui::Id::new(("row_div", r)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
+            let resp = ui
+                .interact(hit, egui::Id::new(("row_div", r)), Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeVertical);
             if resp.dragged() {
                 resize_pair(&mut self.grid_rows, r, resp.drag_delta().y / avail_h);
             }
@@ -227,7 +240,8 @@ impl App {
                 ui.close_menu();
             }
         });
-        let (icon, tip) = if in_grid { ("⤢", "Maximize (or double-click the title)") } else { ("⤡", "Back to grid") };
+        let (icon, tip) =
+            if in_grid { ("⤢", "Maximize (or double-click the title)") } else { ("⤡", "Back to grid") };
         if ui.add(icon_button(icon)).on_hover_text(tip).clicked() {
             if in_grid {
                 self.actions.push(Action::OpenFocus(id));
@@ -296,7 +310,10 @@ impl App {
                     let (bar, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 2.0), Sense::hover());
                     let bar = bar.shrink2(Vec2::new(4.0, 0.0));
                     ui.painter().rect_filled(bar, 1.5, BORDER);
-                    let fill = egui::Rect::from_min_size(bar.min, Vec2::new(bar.width() * (p / 100.0).clamp(0.0, 1.0), bar.height()));
+                    let fill = egui::Rect::from_min_size(
+                        bar.min,
+                        Vec2::new(bar.width() * (p / 100.0).clamp(0.0, 1.0), bar.height()),
+                    );
                     ui.painter().rect_filled(fill, 1.5, context_color(p));
                     resp.on_hover_text(format!("Context {p:.0}% used"));
                 }
@@ -385,17 +402,19 @@ impl App {
                     Vec2::new(340.0, 44.0),
                 );
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(banner));
-                egui::Frame::new().fill(RAISED).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(10).inner_margin(Margin::symmetric(12, 7)).show(
-                    &mut child,
-                    |ui| {
+                egui::Frame::new()
+                    .fill(RAISED)
+                    .stroke(Stroke::new(1.0_f32, BORDER))
+                    .corner_radius(10)
+                    .inner_margin(Margin::symmetric(12, 7))
+                    .show(&mut child, |ui| {
                         ui.horizontal_centered(|ui| {
                             ui.label(RichText::new(format!("Process exited (code {code})")).color(MUTED));
                             if ui.add(primary_button("↻  Restart")).clicked() {
                                 self.actions.push(Action::Restart(id));
                             }
                         });
-                    },
-                );
+                    });
             }
         } else {
             ui.centered_and_justified(|ui| {

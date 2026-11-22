@@ -3,6 +3,8 @@
 
 mod agent;
 mod icon;
+#[cfg(test)]
+mod live_tests;
 mod runner;
 mod status;
 mod term;
@@ -11,25 +13,27 @@ mod theme;
 mod ui;
 mod update;
 mod usage;
-#[cfg(test)]
-mod live_tests;
 
 use agent::{Agent, Permission, Provider, SavedView, State, Usage, WindowLayout};
 use eframe::egui::{self, Align, Color32, CornerRadius, Key, Layout, Margin, RichText, Sense, Stroke, Vec2};
-use usage::ClaudeTracker;
+use status::Status;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use status::Status;
 use std::time::{Duration, Instant};
 use term::TermSession;
 use theme::*;
 use ui::widgets::*;
+use usage::ClaudeTracker;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--statusline") {
         runner::statusline_main(args.get(2).map(String::as_str).unwrap_or(""));
+        return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("--session-hook") {
+        runner::session_hook_main(args.get(2).map(String::as_str).unwrap_or(""));
         return Ok(());
     }
     term::scrub_parent_session_env();
@@ -54,12 +58,8 @@ fn main() -> eframe::Result {
     if state.layout.maximized {
         viewport = viewport.with_maximized(true);
     }
-    let options = eframe::NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Glow,
-        vsync: true,
-        ..Default::default()
-    };
+    let options =
+        eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, vsync: true, ..Default::default() };
     eframe::run_native("Kennel", options, Box::new(move |cc| Ok(Box::new(App::new(cc, state)))))
 }
 
@@ -95,6 +95,8 @@ struct Live {
     last_poll: Instant,
     poll_inflight: bool,
     last_export: Option<Instant>,
+    /// Model, thinking and context as the harness last reported them.
+    info: usage::StatusInfo,
     started: Instant,
     /// Resumed Claude conversation: auto-answer its trust prompt for this folder.
     pending_trust: Option<String>,
@@ -107,7 +109,7 @@ struct Live {
 enum Bg {
     UpdateCheck { result: Result<Option<update::Release>, String>, manual: bool },
     UpdateInstalled(Result<String, String>),
-    OpenCodeUsage { agent_id: u64, session_id: String, usage: Option<Usage> },
+    OpenCodeUsage { agent_id: u64, session_id: String, usage: Option<(Usage, usage::StatusInfo)> },
 }
 
 /// Where the self-updater is.
@@ -333,8 +335,9 @@ impl App {
 
     /// Hover text for an agent, with live model/context info while it runs.
     fn info_text(&self, a: &Agent) -> String {
-        let t = self.live.get(&a.id).and_then(|l| l.claude.as_ref());
-        ui::widgets::agent_info(a, t.map(|t| &t.info), t.and_then(|t| t.context_pct))
+        let l = self.live.get(&a.id);
+        let pct = l.and_then(|l| l.claude.as_ref()).and_then(|t| t.context_pct);
+        ui::widgets::agent_info(a, l.map(|l| &l.info), pct)
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -393,8 +396,7 @@ impl App {
         let a = self.state.agent_mut(id).unwrap();
         a.session_id = Some(launch.session_id.clone());
         a.runs += 1;
-        let claude =
-            (a.provider == Provider::Claude).then(|| ClaudeTracker::new(id, &launch.session_id));
+        let claude = (a.provider == Provider::Claude).then(|| ClaudeTracker::new(id, &launch.session_id));
         let pending_trust = (a.provider == Provider::Claude && launch.resumed && auto_trust).then(|| a.cwd.clone());
         self.live.insert(
             id,
@@ -409,6 +411,7 @@ impl App {
                 last_poll: Instant::now(),
                 poll_inflight: false,
                 last_export: None,
+                info: Default::default(),
                 started: Instant::now(),
                 pending_trust,
                 seen_mark: 0,
@@ -468,6 +471,7 @@ impl App {
                 l.last_poll = Instant::now();
                 if let Some(t) = l.claude.as_mut() {
                     let u = t.poll();
+                    l.info = t.info.clone();
                     let a = self.state.agent_mut(id).unwrap();
                     if a.session_id.as_deref() != Some(t.session_id()) {
                         // Resume the new session next launch.
@@ -481,7 +485,9 @@ impl App {
                 }
             }
             Provider::OpenCode => {
-                let due = force || l.last_export.is_none_or(|t| t.elapsed() > Duration::from_secs(60));
+                // An export is a whole-session dump: often while working, rarely when idle.
+                let every = if l.track.shown == Status::Working { 15 } else { 60 };
+                let due = force || l.last_export.is_none_or(|t| t.elapsed() > Duration::from_secs(every));
                 let (Some(sid), false, true) = (sid, l.poll_inflight, due) else { return };
                 let Some(exe) = runner::exe_for(provider, &self.state.settings) else { return };
                 l.poll_inflight = true;
@@ -499,11 +505,16 @@ impl App {
         while let Ok(msg) = self.bg_rx.try_recv() {
             match msg {
                 Bg::OpenCodeUsage { agent_id, session_id, usage } => {
+                    let current =
+                        self.state.agent(agent_id).is_some_and(|a| a.session_id.as_deref() == Some(&session_id));
                     if let Some(l) = self.live.get_mut(&agent_id) {
                         l.poll_inflight = false;
+                        if let (true, Some((_, info))) = (current, &usage) {
+                            l.info = info.clone();
+                        }
                     }
-                    if let (Some(a), Some(u)) = (self.state.agent_mut(agent_id), usage) {
-                        if a.session_id.as_deref() == Some(&session_id) && a.session_usage != u {
+                    if let (Some(a), Some((u, _)), true) = (self.state.agent_mut(agent_id), usage, current) {
+                        if a.session_usage != u {
                             a.session_usage = u;
                             self.dirty = true;
                         }
@@ -584,9 +595,11 @@ impl App {
                     t.scan_subagents();
                 }
             }
+            let claude = l.claude.is_some();
             if ev.finished_turn || ev.exited {
                 self.poll_usage(id, true);
-            } else if status == Status::Working {
+            } else if status == Status::Working || (claude && status.alive()) {
+                // Also while idle: /resume and /clear switch sessions without a turn.
                 self.poll_usage(id, false);
             }
         }
@@ -723,23 +736,24 @@ impl App {
             if let Some(r) = inner_rect {
                 let w = r.width().round();
                 let h = r.height().round();
-                if w >= 720.0 && h >= 440.0 {
-                    if layout.width != Some(w) || layout.height != Some(h) {
-                        layout.width = Some(w);
-                        layout.height = Some(h);
-                        self.dirty = true;
-                    }
+                if w >= 720.0 && h >= 440.0 && (layout.width != Some(w) || layout.height != Some(h)) {
+                    layout.width = Some(w);
+                    layout.height = Some(h);
+                    self.dirty = true;
                 }
             }
             if let Some(r) = outer_rect {
                 let x = r.min.x.round();
                 let y = r.min.y.round();
-                if x.is_finite() && y.is_finite() && (-3840.0..=7680.0).contains(&x) && (-2160.0..=4320.0).contains(&y) {
-                    if layout.x != Some(x) || layout.y != Some(y) {
-                        layout.x = Some(x);
-                        layout.y = Some(y);
-                        self.dirty = true;
-                    }
+                if x.is_finite()
+                    && y.is_finite()
+                    && (-3840.0..=7680.0).contains(&x)
+                    && (-2160.0..=4320.0).contains(&y)
+                    && (layout.x != Some(x) || layout.y != Some(y))
+                {
+                    layout.x = Some(x);
+                    layout.y = Some(y);
+                    self.dirty = true;
                 }
             }
         }

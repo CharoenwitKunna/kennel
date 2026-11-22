@@ -3,8 +3,8 @@
 
 use crate::agent::{Agent, Provider, Settings};
 use crate::runner;
-use crate::usage::{self, ClaudeTracker};
 use crate::term::TermSession;
+use crate::usage::{self, ClaudeTracker};
 use eframe::egui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -180,7 +180,8 @@ fn live_opencode_terminal() {
     // Our pre-chosen session id must be the one OpenCode used.
     let u = usage::opencode_session_usage(&exe, &sid, Some(&work_dir()));
     println!("session {sid} usage: {u:?}");
-    let u = u.expect("export of our chosen session id failed");
+    let (u, info) = u.expect("export of our chosen session id failed");
+    println!("live info: {info:?}");
     if got.as_deref() == Some("BANANA") {
         assert!(u.total_tokens() > 0);
     }
@@ -260,11 +261,22 @@ fn live_color_probe() {
                     out.push('\n');
                     cur.clear();
                 }
-                let tag = match c.fg { alacritty_terminal::vte::ansi::Color::Named(_) => String::new(), other => format!("{other:?}") };
-                if tag != cur && c.c != ' ' { out.push_str(&format!("[{}]", if tag.is_empty() { "fg".into() } else { tag.replace("Spec(Rgb { ", "").replace(" })", "") })); cur = tag; }
+                let tag = match c.fg {
+                    alacritty_terminal::vte::ansi::Color::Named(_) => String::new(),
+                    other => format!("{other:?}"),
+                };
+                if tag != cur && c.c != ' ' {
+                    out.push_str(&format!(
+                        "[{}]",
+                        if tag.is_empty() { "fg".into() } else { tag.replace("Spec(Rgb { ", "").replace(" })", "") }
+                    ));
+                    cur = tag;
+                }
                 out.push(c.c);
             }
-            for l in out.lines().filter(|l| !l.trim().is_empty()).take(14) { println!("|{}", l.trim_end()); }
+            for l in out.lines().filter(|l| !l.trim().is_empty()).take(14) {
+                println!("|{}", l.trim_end());
+            }
         }
         sess.kill();
     }
@@ -310,7 +322,12 @@ fn live_idle_probe_opencode() {
     for i in 0..10 {
         std::thread::sleep(Duration::from_millis(500));
         let now = sess.screen_text();
-        println!("t+{:.1}s quiet_for={:?} cells_changed={}", i as f32 * 0.5, sess.quiet_for(), cells_changed(&last, &now));
+        println!(
+            "t+{:.1}s quiet_for={:?} cells_changed={}",
+            i as f32 * 0.5,
+            sess.quiet_for(),
+            cells_changed(&last, &now)
+        );
         last = now;
     }
     sess.kill();
@@ -351,7 +368,9 @@ fn live_resume_home_probe() {
     a.cwd = std::env::var("USERPROFILE").unwrap();
     a.model = "haiku".into();
     let accept_trust = |sess: &TermSession| {
-        if wait_for(sess, &["trust this folder", "\u{276f} Try", "for shortcuts"], 20).as_deref() == Some("trust this folder") {
+        if wait_for(sess, &["trust this folder", "\u{276f} Try", "for shortcuts"], 20).as_deref()
+            == Some("trust this folder")
+        {
             wait_quiet(sess, 1000, 10);
             sess.write(b"\x1b[B".to_vec());
             std::thread::sleep(Duration::from_millis(300));
@@ -400,11 +419,7 @@ fn live_question_probe() {
         submit_checked(&sess, prompt);
         std::thread::sleep(Duration::from_secs(4));
         wait_quiet(&sess, 2500, 60);
-        println!(
-            "agent {n}: busy={} asks_user={}",
-            sess.busy(),
-            runner::screen_asks_user(&sess.screen_text())
-        );
+        println!("agent {n}: busy={} asks_user={}", sess.busy(), runner::screen_asks_user(&sess.screen_text()));
         sess.kill();
     }
 }

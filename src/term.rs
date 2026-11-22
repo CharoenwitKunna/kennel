@@ -154,7 +154,13 @@ pub struct SpawnSpec {
 }
 
 impl TermSession {
-    pub fn spawn(spec: SpawnSpec, cols: usize, rows: usize, scrollback: usize, ctx: egui::Context) -> std::io::Result<Self> {
+    pub fn spawn(
+        spec: SpawnSpec,
+        cols: usize,
+        rows: usize,
+        scrollback: usize,
+        ctx: egui::Context,
+    ) -> std::io::Result<Self> {
         let size = Size { cols: cols.max(20), rows: rows.max(5) };
         let ws = window_size(size, 8.0, 16.0);
         let mut env = spec.env;
@@ -329,10 +335,7 @@ impl TermSession {
     }
 
     pub fn exited(&self) -> Option<i32> {
-        self.shared
-            .exited
-            .load(Ordering::Relaxed)
-            .then(|| self.shared.exit_code.load(Ordering::Relaxed))
+        self.shared.exited.load(Ordering::Relaxed).then(|| self.shared.exit_code.load(Ordering::Relaxed))
     }
 
     /// Time since the last output, or None if there was none yet.

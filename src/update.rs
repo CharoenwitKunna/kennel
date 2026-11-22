@@ -61,12 +61,11 @@ pub fn parse_release(v: &Value) -> Option<Release> {
         return None;
     }
     let version = v["tag_name"].as_str()?.trim_start_matches(['v', 'V']).to_string();
-    let download = v["assets"]
-        .as_array()?
-        .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(ASSET)))?["browser_download_url"]
-        .as_str()?
-        .to_string();
+    let download =
+        v["assets"].as_array()?.iter().find(|a| a["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(ASSET)))?
+            ["browser_download_url"]
+            .as_str()?
+            .to_string();
     let page = v["html_url"].as_str().unwrap_or_default().to_string();
     Some(Release { version, download, page })
 }

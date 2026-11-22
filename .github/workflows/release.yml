@@ -1,0 +1,66 @@
+name: Release
+
+# One click (Actions → Release → Run workflow, or `gh workflow run release.yml -f bump=patch`):
+# bumps the version in Cargo.toml, commits, tags, and starts CI on the tag,
+# which tests, builds and publishes the GitHub Release.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write # push the version commit and tag
+  actions: write # start CI on the new tag
+
+concurrency:
+  group: release
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Bump version
+        id: v
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          cur=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          IFS=. read -r major minor patch <<< "$cur"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            *)     patch=$((patch + 1)) ;;
+          esac
+          new="$major.$minor.$patch"
+          sed -i "0,/^version = \"$cur\"/s//version = \"$new\"/" Cargo.toml
+          sed -i "/^name = \"kennel\"$/{n;s/^version = \"$cur\"/version = \"$new\"/}" Cargo.lock
+          git diff --stat
+          grep -q "^version = \"$new\"" Cargo.toml || { echo "::error::version bump failed"; exit 1; }
+          echo "tag=v$new" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag and push
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $TAG"
+          git tag "$TAG"
+          git push origin HEAD:main "$TAG"
+
+      # Pushes made with GITHUB_TOKEN don't trigger workflows, but a dispatch does.
+      - name: Build and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo "Started CI for $TAG: https://github.com/$GITHUB_REPOSITORY/actions/workflows/ci.yml" >> "$GITHUB_STEP_SUMMARY"

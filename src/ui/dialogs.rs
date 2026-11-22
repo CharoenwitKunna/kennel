@@ -189,7 +189,9 @@ impl App {
         }
         // Cache PATH/.cmd shim resolution until Settings closes or an input changes.
         let need_resolve = match &self.cli_cache {
-            Some((c_in, o_in, _, _)) => c_in != &self.state.settings.claude_path || o_in != &self.state.settings.opencode_path,
+            Some((c_in, o_in, _, _)) => {
+                c_in != &self.state.settings.claude_path || o_in != &self.state.settings.opencode_path
+            }
             None => true,
         };
         if need_resolve {
@@ -234,13 +236,24 @@ impl App {
                 found_label(ui, &opencode);
                 ui.add_space(8.0);
                 field_label(ui, "Terminal font size");
-                self.dirty |= ui.add(egui::Slider::new(&mut self.state.settings.font_size, 10.0..=22.0).step_by(0.5)).changed();
+                self.dirty |=
+                    ui.add(egui::Slider::new(&mut self.state.settings.font_size, 10.0..=22.0).step_by(0.5)).changed();
                 ui.add_space(8.0);
                 field_label(ui, "Scrollback lines per terminal");
                 self.dirty |= ui
-                    .add(egui::Slider::new(&mut self.state.settings.scrollback, 500..=20_000).step_by(500.0).logarithmic(true))
+                    .add(
+                        egui::Slider::new(&mut self.state.settings.scrollback, 500..=20_000)
+                            .step_by(500.0)
+                            .logarithmic(true),
+                    )
                     .changed();
-                ui.label(RichText::new("Less uses less memory with many agents. Applies to agents started after the change.").small().color(MUTED));
+                ui.label(
+                    RichText::new(
+                        "Less uses less memory with many agents. Applies to agents started after the change.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
                 ui.add_space(8.0);
                 field_label(ui, "Resuming");
                 self.dirty |= ui
@@ -257,7 +270,8 @@ impl App {
                 ui.add_space(8.0);
                 field_label(ui, "Updates");
                 ui.horizontal(|ui| {
-                    self.dirty |= ui.checkbox(&mut self.state.settings.check_updates, "Check GitHub for new releases").changed();
+                    self.dirty |=
+                        ui.checkbox(&mut self.state.settings.check_updates, "Check GitHub for new releases").changed();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let checking = self.update == UpdateState::Checking;
                         if ui.add_enabled(!checking, ghost_button("Check now")).clicked() {
@@ -327,9 +341,9 @@ impl App {
         if self.toasts.is_empty() {
             return;
         }
-        egui::Area::new(egui::Id::new("toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -40.0))
-            .show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -40.0)).show(
+            ctx,
+            |ui| {
                 for (_, msg) in &self.toasts {
                     egui::Frame::new()
                         .fill(RAISED)
@@ -342,7 +356,8 @@ impl App {
                         });
                     ui.add_space(6.0);
                 }
-            });
+            },
+        );
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 
@@ -350,12 +365,7 @@ impl App {
         let ctrl = egui::Modifiers::CTRL;
         let cs = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
         let focused = ctx.memory(|m| m.focused());
-        let target_agent = self
-            .live
-            .keys()
-            .copied()
-            .find(|id| focused == Some(term_id(*id)))
-            .or(self.selected);
+        let target_agent = self.live.keys().copied().find(|id| focused == Some(term_id(*id))).or(self.selected);
         ctx.input_mut(|i| {
             if i.consume_key(cs, Key::G) {
                 self.view = if self.view == View::Focus { View::Grid } else { View::Focus };
@@ -393,13 +403,14 @@ impl App {
                     self.dirty = true;
                 }
             }
-            if i.consume_key(ctrl, Key::Num0) {
-                if (self.state.settings.font_size - agent::DEFAULT_FONT_SIZE).abs() > f32::EPSILON {
-                    self.state.settings.font_size = agent::DEFAULT_FONT_SIZE;
-                    self.dirty = true;
-                }
+            if i.consume_key(ctrl, Key::Num0)
+                && (self.state.settings.font_size - agent::DEFAULT_FONT_SIZE).abs() > f32::EPSILON
+            {
+                self.state.settings.font_size = agent::DEFAULT_FONT_SIZE;
+                self.dirty = true;
             }
-            let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+            let digits =
+                [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             for (n, k) in digits.into_iter().enumerate() {
                 if i.consume_key(cs, k) {
                     if let Some(a) = self.state.agents.get(n) {

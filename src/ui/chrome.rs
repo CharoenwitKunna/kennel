@@ -6,7 +6,12 @@ impl App {
     pub(crate) fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
             .exact_height(32.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(Margin { left: 6, right: 0, top: 0, bottom: 0 }).stroke(Stroke::new(1.0_f32, BORDER)))
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(Margin { left: 6, right: 0, top: 0, bottom: 0 })
+                    .stroke(Stroke::new(1.0_f32, BORDER)),
+            )
             .show(ctx, |ui| {
                 // Empty toolbar space acts as the title bar. Registered first so
                 // the buttons drawn on top keep their clicks.
@@ -18,7 +23,11 @@ impl App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 ui.horizontal_centered(|ui| {
-                    let tip = if self.state.settings.sidebar_hidden { "Show sidebar (Ctrl+Shift+B)" } else { "Hide sidebar (Ctrl+Shift+B)" };
+                    let tip = if self.state.settings.sidebar_hidden {
+                        "Show sidebar (Ctrl+Shift+B)"
+                    } else {
+                        "Hide sidebar (Ctrl+Shift+B)"
+                    };
                     if ui.add(icon_button("☰")).on_hover_text(tip).clicked() {
                         self.state.settings.sidebar_hidden = !self.state.settings.sidebar_hidden;
                         self.dirty = true;
@@ -32,7 +41,8 @@ impl App {
                         if window_button(ui, WinBtn::Close).on_hover_text("Close").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        let (kind, tip) = if maximized { (WinBtn::Restore, "Restore") } else { (WinBtn::Maximize, "Maximize") };
+                        let (kind, tip) =
+                            if maximized { (WinBtn::Restore, "Restore") } else { (WinBtn::Maximize, "Maximize") };
                         if window_button(ui, kind).on_hover_text(tip).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                         }
@@ -66,7 +76,10 @@ impl App {
                             UpdateState::Available(r) => {
                                 if ui
                                     .add(primary_button(&format!("⬆  Update to {}", r.version)))
-                                    .on_hover_text(format!("You have {}. Downloads the new version from GitHub.", update::CURRENT))
+                                    .on_hover_text(format!(
+                                        "You have {}. Downloads the new version from GitHub.",
+                                        update::CURRENT
+                                    ))
                                     .clicked()
                                 {
                                     self.install_update(ctx);
@@ -211,7 +224,10 @@ impl App {
         let age = self.status_age(a.id);
         let inner = egui::Frame::new()
             .fill(if selected { RAISED } else { PANEL })
-            .stroke(Stroke::new(1.0_f32, if selected { Color32::from_rgb(0x34, 0x3B, 0x50) } else { Color32::TRANSPARENT }))
+            .stroke(Stroke::new(
+                1.0_f32,
+                if selected { Color32::from_rgb(0x34, 0x3B, 0x50) } else { Color32::TRANSPARENT },
+            ))
             .corner_radius(5)
             .inner_margin(Margin::symmetric(6, 3))
             .show(ui, |ui| {
@@ -234,7 +250,9 @@ impl App {
                             ui.painter().circle_filled(r.center(), 3.0, AMBER);
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.add(egui::Label::new(RichText::new(&a.name).font(bold(12.5))).truncate().selectable(false));
+                            ui.add(
+                                egui::Label::new(RichText::new(&a.name).font(bold(12.5))).truncate().selectable(false),
+                            );
                         });
                     });
                 });
@@ -272,7 +290,9 @@ impl App {
                             ui.add_space(31.0);
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(format!("+{} more subagents", subs.len() - MAX_SUBS)).size(10.0).color(FAINT),
+                                    RichText::new(format!("+{} more subagents", subs.len() - MAX_SUBS))
+                                        .size(10.0)
+                                        .color(FAINT),
                                 )
                                 .selectable(false),
                             );

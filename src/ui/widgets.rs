@@ -10,17 +10,22 @@ pub(crate) fn logo(ui: &mut egui::Ui) {
 }
 
 pub(crate) fn segmented(ui: &mut egui::Ui, view: &mut View) {
-    egui::Frame::new().fill(BG).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(6).inner_margin(Margin::same(2)).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        ui.horizontal(|ui| {
-            for (v, label) in [(View::Focus, "▣  Focus"), (View::Grid, "▦  Grid")] {
-                let btn = Btn { text: label.into(), kind: BtnKind::Segment(*view == v) };
-                if ui.add(btn).on_hover_text("Ctrl+Shift+G").clicked() {
-                    *view = v;
+    egui::Frame::new()
+        .fill(BG)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(6)
+        .inner_margin(Margin::same(2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                for (v, label) in [(View::Focus, "▣  Focus"), (View::Grid, "▦  Grid")] {
+                    let btn = Btn { text: label.into(), kind: BtnKind::Segment(*view == v) };
+                    if ui.add(btn).on_hover_text("Ctrl+Shift+G").clicked() {
+                        *view = v;
+                    }
                 }
-            }
+            });
         });
-    });
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -65,7 +70,11 @@ impl egui::Widget for Btn {
         let red_hi = Color32::from_rgb(0xF0, 0x6E, 0x6E);
         let (mut fill, stroke, mut fg) = match self.kind {
             Primary => (lp(ACCENT.gamma_multiply(0.9), accent_hi), Stroke::NONE, Color32::WHITE),
-            Ghost => (lp(RAISED, HOVER), Stroke::new(1.0_f32, lp(BORDER, Color32::from_rgb(0x3E, 0x46, 0x5E))), lp(TEXT, Color32::WHITE)),
+            Ghost => (
+                lp(RAISED, HOVER),
+                Stroke::new(1.0_f32, lp(BORDER, Color32::from_rgb(0x3E, 0x46, 0x5E))),
+                lp(TEXT, Color32::WHITE),
+            ),
             Danger => (lp(RED.gamma_multiply(0.75), red_hi), Stroke::NONE, Color32::WHITE),
             Icon => (lp(clear, HOVER), Stroke::NONE, lp(MUTED, TEXT)),
             Segment(true) => (RAISED, Stroke::NONE, TEXT),
@@ -133,7 +142,12 @@ pub(crate) fn window_button(ui: &mut egui::Ui, kind: WinBtn) -> egui::Response {
             painter.hline(c.x - h..=c.x + h, c.y + 0.5, s);
         }
         WinBtn::Maximize => {
-            painter.rect_stroke(egui::Rect::from_center_size(c, Vec2::splat(2.0 * h)), 1.0, s, egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, Vec2::splat(2.0 * h)),
+                1.0,
+                s,
+                egui::StrokeKind::Inside,
+            );
         }
         WinBtn::Restore => {
             let back = egui::Rect::from_center_size(c + Vec2::new(2.0, -2.0), Vec2::splat(2.0 * h - 2.0));
@@ -158,8 +172,12 @@ pub(crate) fn window_edges(ctx: &egui::Context) {
     let screen = ctx.screen_rect();
     if !maximized {
         // Hairline so the window edge is visible on any background.
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("frame")))
-            .rect_stroke(screen, 0.0, Stroke::new(1.0_f32, BORDER), egui::StrokeKind::Inside);
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("frame"))).rect_stroke(
+            screen,
+            0.0,
+            Stroke::new(1.0_f32, BORDER),
+            egui::StrokeKind::Inside,
+        );
     }
     let Some(p) = pos else { return };
     if maximized {
@@ -198,7 +216,13 @@ pub(crate) fn question_badge(ui: &mut egui::Ui) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
     let painter = ui.painter();
     painter.circle_filled(r.center(), 6.5, AMBER);
-    painter.text(r.center() + Vec2::new(0.0, 0.5), egui::Align2::CENTER_CENTER, "?", bold(10.0), Color32::from_rgb(0x1A, 0x14, 0x05));
+    painter.text(
+        r.center() + Vec2::new(0.0, 0.5),
+        egui::Align2::CENTER_CENTER,
+        "?",
+        bold(10.0),
+        Color32::from_rgb(0x1A, 0x14, 0x05),
+    );
     resp
 }
 
@@ -241,8 +265,6 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, s: Status) -> egui::Response {
     resp
 }
 
-
-
 pub(crate) fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(MUTED).strong());
 }
@@ -253,7 +275,6 @@ pub(crate) fn found_label(ui: &mut egui::Ui, p: &Option<PathBuf>) {
         None => ui.label(RichText::new("✗ Not found").small().color(RED)),
     };
 }
-
 
 pub(crate) fn provider_card(ui: &mut egui::Ui, p: Provider, sub: &str, selected: bool) -> egui::Response {
     let inner = egui::Frame::new()
@@ -329,7 +350,13 @@ pub(crate) fn app_row(ui: &mut egui::Ui, p: Provider, sub: &str, enabled: bool) 
     let x = icon.right() + 9.0;
     let name_color = if enabled { TEXT } else { FAINT };
     painter.text(egui::pos2(x, rect.top() + 4.0), egui::Align2::LEFT_TOP, p.label(), bold(12.5), name_color);
-    painter.text(egui::pos2(x, rect.top() + 20.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(10.5), MUTED);
+    painter.text(
+        egui::pos2(x, rect.top() + 20.0),
+        egui::Align2::LEFT_TOP,
+        sub,
+        egui::FontId::proportional(10.5),
+        MUTED,
+    );
     if resp.hovered() && enabled {
         painter.text(
             egui::pos2(rect.right() - 8.0, rect.center().y),
@@ -359,7 +386,12 @@ pub(crate) fn draw_app_icon(painter: &egui::Painter, rect: egui::Rect, p: Provid
         }
         Provider::OpenCode => {
             painter.rect_filled(rect, w * 0.24, Color32::from_rgb(0x1A, 0x1C, 0x22));
-            painter.rect_stroke(rect, w * 0.24, Stroke::new(1.0_f32, Color32::from_rgb(0x3A, 0x3F, 0x4C)), egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                rect,
+                w * 0.24,
+                Stroke::new(1.0_f32, Color32::from_rgb(0x3A, 0x3F, 0x4C)),
+                egui::StrokeKind::Inside,
+            );
             let o = egui::Rect::from_center_size(c, Vec2::splat(w * 0.44));
             painter.rect_stroke(o, 0.0, Stroke::new((w * 0.1).max(1.5), Color32::WHITE), egui::StrokeKind::Inside);
             let inner = egui::Rect::from_min_max(egui::pos2(o.left(), o.center().y), o.max).shrink(w * 0.1);
@@ -404,7 +436,8 @@ pub(crate) fn resize_pair(fracs: &mut [f32], i: usize, delta: f32) {
 
 /// "12.3k tok · ctx 34%", in reading order whichever way the layout runs.
 pub(crate) fn pane_stats(ui: &mut egui::Ui, a: &Agent, context: Option<f32>, rtl: bool) {
-    let mut items = vec![(RichText::new(format!("{} tok", fmt_tokens(a.session_usage.total_tokens()))).small().color(FAINT), None)];
+    let mut items =
+        vec![(RichText::new(format!("{} tok", fmt_tokens(a.session_usage.total_tokens()))).small().color(FAINT), None)];
     if let Some(p) = context {
         items.push((RichText::new("·").small().color(FAINT), None));
         items.push((
@@ -422,7 +455,6 @@ pub(crate) fn pane_stats(ui: &mut egui::Ui, a: &Agent, context: Option<f32>, rtl
         }
     }
 }
-
 
 pub(crate) fn context_color(pct: f32) -> Color32 {
     if pct >= 85.0 {
@@ -451,13 +483,16 @@ pub(crate) fn agent_info(a: &Agent, live: Option<&crate::usage::StatusInfo>, con
         (None, Some(e)) => format!("effort {e}"),
         (None, None) => "—".to_string(),
     };
-    let ctx = match (live.context, context_pct) {
-        (Some((used, size)), pct) => {
-            let pct = pct.unwrap_or(if size > 0 { used as f32 * 100.0 / size as f32 } else { 0.0 });
-            format!("{} / {} ({pct:.0}%)", fmt_tokens(used), fmt_tokens(size))
-        }
-        (None, Some(pct)) => format!("{pct:.0}%"),
-        (None, None) => "—".to_string(),
+    let pct = context_pct.or(match (live.context, live.context_size) {
+        (Some(used), Some(size)) if size > 0 => Some(used as f32 * 100.0 / size as f32),
+        _ => None,
+    });
+    let ctx = match (live.context, live.context_size, pct) {
+        (Some(used), Some(size), Some(p)) => format!("{} / {} ({p:.0}%)", fmt_tokens(used), fmt_tokens(size)),
+        (Some(used), _, Some(p)) => format!("{} ({p:.0}%)", fmt_tokens(used)),
+        (Some(used), _, None) => format!("{} tokens", fmt_tokens(used)),
+        (None, _, Some(p)) => format!("{p:.0}%"),
+        (None, _, None) => "—".to_string(),
     };
     let u = &a.session_usage;
     format!(

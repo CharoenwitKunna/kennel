@@ -130,7 +130,6 @@ pub struct Launch {
     pub spec: SpawnSpec,
     /// Session id this launch uses (store it on the agent).
     pub session_id: String,
-    #[allow(dead_code)] // checked by the live tests
     pub resumed: bool,
 }
 

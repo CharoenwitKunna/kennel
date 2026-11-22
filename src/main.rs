@@ -91,6 +91,9 @@ struct Live {
     poll_inflight: bool,
     last_export: Option<Instant>,
     final_polled: bool,
+    started: Instant,
+    /// Resumed Claude conversation: auto-answer its trust prompt for this folder.
+    pending_trust: Option<String>,
 }
 
 enum Bg {
@@ -237,11 +240,13 @@ impl App {
             Ok(s) => s,
             Err(e) => return self.toast(format!("Could not start {}: {e}", agent.name)),
         };
+        let auto_trust = self.state.settings.auto_trust_on_resume;
         let a = self.state.agent_mut(id).unwrap();
         a.session_id = Some(launch.session_id.clone());
         a.runs += 1;
         let claude =
             (a.provider == Provider::Claude).then(|| ClaudeTracker::new(id, &launch.session_id));
+        let pending_trust = (a.provider == Provider::Claude && launch.resumed && auto_trust).then(|| a.cwd.clone());
         self.live.insert(
             id,
             Live {
@@ -253,6 +258,8 @@ impl App {
                 poll_inflight: false,
                 last_export: None,
                 final_polled: false,
+                started: Instant::now(),
+                pending_trust,
             },
         );
         self.focus_term = Some(id);
@@ -346,6 +353,7 @@ impl App {
             }
         }
 
+        self.answer_resume_trust();
         let focused_term = ctx.memory(|m| m.focused());
         let ids: Vec<u64> = self.live.keys().copied().collect();
         for id in ids {
@@ -371,6 +379,38 @@ impl App {
             } else if working {
                 self.poll_usage(id, false);
             }
+        }
+    }
+
+    /// A resumed Claude conversation re-asks "trust this folder?" (always, for the
+    /// home folder). The folder was trusted when the conversation began, so pick
+    /// "Yes"  14 but only if the prompt names this agent's own folder.
+    fn answer_resume_trust(&mut self) {
+        for l in self.live.values_mut() {
+            let Some(folder) = l.pending_trust.as_deref() else { continue };
+            if l.started.elapsed() > Duration::from_secs(30) || l.sess.exited().is_some() {
+                l.pending_trust = None;
+                continue;
+            }
+            // Wait until the prompt has finished drawing and is ready for keys.
+            if !l.sess.quiet_for().is_some_and(|d| d > Duration::from_millis(700)) {
+                continue;
+            }
+            let screen = l.sess.screen_text();
+            if !screen.contains("Yes, I trust this folder") {
+                // Claude may show its normal prompt (folder already trusted).
+                if screen.contains('\u{276f}') && l.started.elapsed() > Duration::from_secs(8) {
+                    l.pending_trust = None;
+                }
+                continue;
+            }
+            let names_folder = screen.lines().any(|line| same_folder(line, folder));
+            if names_folder {
+                // Options are "No, exit" (default) then "Yes, I trust this folder".
+                l.sess.write(b"\x1b[B".to_vec());
+                l.sess.write_after(b"\r", Duration::from_millis(300));
+            }
+            l.pending_trust = None;
         }
     }
 
@@ -1108,6 +1148,19 @@ impl App {
                 field_label(ui, "Terminal font size");
                 self.dirty |= ui.add(egui::Slider::new(&mut self.state.settings.font_size, 10.0..=20.0).step_by(0.5)).changed();
                 ui.add_space(8.0);
+                field_label(ui, "Resuming");
+                self.dirty |= ui
+                    .checkbox(
+                        &mut self.state.settings.auto_trust_on_resume,
+                        "Skip Claude's folder-trust question when resuming a conversation",
+                    )
+                    .changed();
+                ui.label(
+                    RichText::new("Only for the agent's own folder, which you trusted when the conversation started.")
+                        .small()
+                        .color(MUTED),
+                );
+                ui.add_space(8.0);
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(agent::data_dir().display().to_string()).small().color(MUTED));
@@ -1529,5 +1582,31 @@ fn fmt_tokens(n: u64) -> String {
         0..=999 => n.to_string(),
         1_000..=999_999 => format!("{:.1}k", n as f64 / 1e3),
         _ => format!("{:.2}M", n as f64 / 1e6),
+    }
+}
+
+/// Does a screen line name `folder` (blank = home)? Case- and slash-insensitive.
+fn same_folder(line: &str, folder: &str) -> bool {
+    let home;
+    let folder = if folder.trim().is_empty() {
+        home = std::env::var("USERPROFILE").unwrap_or_default();
+        home.as_str()
+    } else {
+        folder
+    };
+    let norm = |s: &str| s.trim().trim_end_matches(['\\', '/']).replace('/', "\\").to_lowercase();
+    !folder.trim().is_empty() && norm(line) == norm(folder)
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::same_folder;
+
+    #[test]
+    fn matches_only_the_agents_own_folder() {
+        assert!(same_folder(r" C:\Users\User", r"C:\Users\User"));
+        assert!(same_folder("c:/users/user/", r"C:\Users\User"));
+        assert!(!same_folder(r" C:\Users\User\other", r"C:\Users\User"));
+        assert!(!same_folder("Accessing workspace:", r"C:\Users\User"));
     }
 }

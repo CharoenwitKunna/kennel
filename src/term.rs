@@ -187,6 +187,15 @@ impl TermSession {
         });
     }
 
+    /// Send bytes after a short delay (lets a TUI react to a previous key).
+    pub fn write_after(&self, bytes: &'static [u8], delay: Duration) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let _ = tx.send(Msg::Input(Cow::Borrowed(bytes)));
+        });
+    }
+
     pub fn scroll_to_bottom(&self) {
         let mut t = self.term.lock();
         if t.grid().display_offset() != 0 {
@@ -236,8 +245,7 @@ impl TermSession {
         self.shared.bell.swap(false, Ordering::Relaxed)
     }
 
-    /// Plain text of the visible screen (used by the live tests).
-    #[cfg(test)]
+    /// Plain text of the visible screen.
     pub fn screen_text(&self) -> String {
         let t = self.term.lock();
         let content = t.renderable_content();

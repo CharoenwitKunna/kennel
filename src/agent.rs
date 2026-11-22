@@ -169,6 +169,15 @@ pub struct Settings {
     /// Folder new agents open in (the last one used).
     #[serde(default)]
     pub last_folder: String,
+    /// When resuming a Claude conversation, answer Claude's "trust this folder?"
+    /// with Yes if it asks about the agent's own folder (already trusted when the
+    /// conversation started; Claude never remembers trust for the home folder).
+    #[serde(default = "yes")]
+    pub auto_trust_on_resume: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_font_size() -> f32 {
@@ -182,6 +191,7 @@ impl Default for Settings {
             opencode_path: String::new(),
             font_size: default_font_size(),
             last_folder: String::new(),
+            auto_trust_on_resume: true,
         }
     }
 }

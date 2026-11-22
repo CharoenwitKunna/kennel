@@ -340,3 +340,42 @@ fn live_busy_probe() {
     println!("after answer: busy={}", sess.busy());
     sess.kill();
 }
+
+#[test]
+#[ignore]
+fn live_resume_home_probe() {
+    // What does resuming a Claude session in the HOME folder look like?
+    crate::term::scrub_parent_session_env();
+    let mut a = Agent::new(9007, "resume-home".into(), Provider::Claude);
+    a.cwd = std::env::var("USERPROFILE").unwrap();
+    a.model = "haiku".into();
+    let accept_trust = |sess: &TermSession| {
+        if wait_for(sess, &["trust this folder", "\u{276f} Try", "for shortcuts"], 20).as_deref() == Some("trust this folder") {
+            wait_quiet(sess, 1000, 10);
+            sess.write(b"\x1b[B".to_vec());
+            std::thread::sleep(Duration::from_millis(300));
+            sess.write(b"\r".to_vec());
+        }
+        wait_quiet(sess, 1500, 15);
+    };
+    let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
+    a.session_id = Some(launch.session_id.clone());
+    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    accept_trust(&sess);
+    submit_checked(&sess, "Remember the word MANGO. Reply only with the word READY.");
+    let got = wait_for(&sess, &["{25cf} READY", "{25cf}"], 60);
+    println!("first run reply: {got:?}");
+    wait_quiet(&sess, 2000, 20);
+    sess.kill();
+    drop(sess);
+    std::thread::sleep(Duration::from_secs(1));
+
+    let launch = runner::launch(&a, &Settings::default(), &app_exe()).unwrap();
+    println!("second launch resumed={} args={:?}", launch.resumed, &launch.spec.args[..2]);
+    let sess = TermSession::spawn(launch.spec, 100, 30, egui::Context::default()).unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    dump("resume: first screen", &sess);
+    accept_trust(&sess);
+    dump("resume: after trusting", &sess);
+    sess.kill();
+}

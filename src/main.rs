@@ -832,6 +832,10 @@ impl App {
                                 self.begin_rename(id);
                                 ui.close_menu();
                             }
+                            if status.alive() && ui.button("Restart").clicked() {
+                                self.actions.push(Action::Restart(id));
+                                ui.close_menu();
+                            }
                             if ui.button("Edit…").clicked() {
                                 self.actions.push(Action::Edit(id));
                                 ui.close_menu();
@@ -858,9 +862,6 @@ impl App {
                         if status.alive() {
                             if ui.add(icon_button("■")).on_hover_text("Stop").clicked() {
                                 self.actions.push(Action::Stop(id));
-                            }
-                            if ui.add(icon_button("↻")).on_hover_text("Restart").clicked() {
-                                self.actions.push(Action::Restart(id));
                             }
                         } else {
                             let tip = if a.session_id.is_some() { "Resume" } else { "Start" };
